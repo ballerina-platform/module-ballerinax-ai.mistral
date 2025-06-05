@@ -14,18 +14,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import ai.model.provider.mistral.mistral;
-
 import ballerina/ai;
 import ballerina/lang.regexp;
 import ballerina/uuid;
+import ballerinax/mistral;
 
 const DEFAULT_MISTRAL_AI_SERVICE_URL = "https://api.mistral.ai/v1";
 const DEFAULT_MAX_TOKEN_COUNT = 512;
 const DEFAULT_TEMPERATURE = 0.7d;
 
 # MistralAiProvider is a client class that provides an interface for interacting with Mistral AI Large Language Models.
-public isolated client class MistralAiProvider {
+public isolated client class Provider {
     *ai:ModelProvider;
     private final mistral:Client llmClient;
     private final string modelType;

@@ -29,7 +29,7 @@ Here's how to initialize the Model Provider:
 import ballerina/ai;
 import ballerinax/ai.model.provider.mistral;
 
-final ai:ModelProvider  mistralModel = check new mistral:Provider("mistralApiKey", mistral:MINISTRAL_3B_2410);
+final ai:ModelProvider mistralModel = check new mistral:Provider("mistralApiKey", mistral:MINISTRAL_3B_2410);
 ```
 
 ### Step 4: Invoke chat completion
