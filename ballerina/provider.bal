@@ -151,7 +151,7 @@ public isolated client class Provider {
                 ai:FunctionCall[]? toolCalls = message.toolCalls;
                 mistral:AssistantMessage mistralAssistantMessage = {role: ai:ASSISTANT, content: message.content};
                 if toolCalls is ai:FunctionCall[] {
-                    mistral:FunctionCall functionCall = {name: toolCalls[0].name, arguments: toolCalls[0].arguments};
+                    mistral:FunctionCall functionCall = {name: toolCalls[0].name, arguments: toolCalls[0].arguments.toJsonString()};
                     mistral:ToolCall[] toolCall = [{'function: functionCall, id: toolCalls[0]?.id ?: self.generateToolId()}];
                     mistralAssistantMessage.toolCalls = toolCall;
                 }
@@ -196,12 +196,21 @@ public isolated client class Provider {
         }
         ai:FunctionCall[] functionCalls = [];
         foreach mistral:ToolCall toolcall in toolCalls {
-            functionCalls.push({
-                name: toolcall.'function.name,
-                id: toolcall.id,
-                arguments: toolcall.'function.arguments.toString()
-            });
+            functionCalls.push(check self.mapToFunctionCall(toolcall));
         }
         return {role: ai:ASSISTANT, toolCalls: functionCalls, content: stringContent};
+    }
+
+    private isolated function mapToFunctionCall(mistral:ToolCall toolCall)
+    returns ai:FunctionCall|ai:LlmError {
+        do {
+            record {}|string functionArgs = toolCall.'function.arguments;
+            json jsonArgs = functionArgs is string ? check functionArgs.fromJsonString() : functionArgs.toJson();
+            map<json>? arguments = check jsonArgs.cloneWithType();
+            return {name: toolCall.'function.name, arguments, id: toolCall.id};
+
+        } on fail error e {
+            return error ai:LlmError("Invalid or malformed arguments received in function call response.", e);
+        }
     }
 }
