@@ -1,7 +1,7 @@
 # Ballerina MistralAI Model Provider Library
 
-[![Build](https://github.com/ballerina-platform/module-ballerinax-ai.model.provider.mistral/workflows/CI/badge.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.model.provider.mistral/actions?query=workflow%3ACI)
-[![GitHub Last Commit](https://img.shields.io/github/last-commit/ballerina-platform/module-ballerinax-ai.model.provider.mistral.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.model.provider.mistral/commits/master)
+[![Build](https://github.com/ballerina-platform/module-ballerinax-ai.mistral/workflows/CI/badge.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.mistral/actions?query=workflow%3ACI)
+[![GitHub Last Commit](https://img.shields.io/github/last-commit/ballerina-platform/module-ballerinax-ai.mistral.svg)](https://github.com/ballerina-platform/module-ballerinax-ai.mistral/commits/master)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Overview
