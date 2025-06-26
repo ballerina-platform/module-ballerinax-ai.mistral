@@ -29,6 +29,8 @@ public isolated client class ModelProvider {
     private final mistral:Client llmClient;
     private final string modelType;
     private final string apiKey;
+    private final decimal temperature;
+    private final int maxTokens;
 
     # # Initializes the Mistral AI model with the given connection configuration and model configuration.
     #
@@ -73,6 +75,8 @@ public isolated client class ModelProvider {
         self.llmClient = llmClient;
         self.modelType = modelType;
         self.apiKey = apiKey;
+        self.temperature = temperature;
+        self.maxTokens = maxTokens;
     }
 
     # Uses function call API to determine next function to be called
@@ -84,7 +88,13 @@ public isolated client class ModelProvider {
     isolated remote function chat(ai:ChatMessage[] messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
         returns ai:ChatAssistantMessage|ai:LlmError {
         MistralMessages[] mistralMessages = self.mapToMistralMessageRecords(messages);
-        mistral:ChatCompletionRequest request = {model: self.modelType, stop, messages: mistralMessages};
+        mistral:ChatCompletionRequest request = {
+            model: self.modelType,
+            stop,
+            messages: mistralMessages,
+            temperature: self.temperature,
+            maxTokens: self.maxTokens
+        };
 
         if tools.length() > 0 {
             mistral:Function[] mistralFunctions = [];
