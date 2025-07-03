@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/jballerina.java;
 import ballerina/lang.regexp;
 import ballerina/uuid;
 import ballerinax/mistral;
@@ -65,7 +66,7 @@ public isolated client class Provider {
             validation: connectionConfig.validation
         };
 
-        mistral:Client|error llmClient = new (mistralConfig);
+        mistral:Client|error llmClient = new (mistralConfig, serviceUrl);
         if llmClient is error {
             return error ai:Error("Failed to initialize MistralAiProvider", llmClient);
         }
@@ -112,6 +113,16 @@ public isolated client class Provider {
         }
         return self.getAssistantMessage(response);
     }
+
+    # Sends a chat request to the model and generates a value that belongs to the type
+    # corresponding to the type descriptor argument.
+    # 
+    # + prompt - The prompt to use in the chat messages
+    # + td - Type descriptor specifying the expected return type format
+    # + return - Generates a value that belongs to the type, or an error if generation fails
+    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = @java:Method {
+        'class: "io.ballerina.lib.ai.mistral.Generator"
+    } external;
 
     # Generates a random tool ID.
     #
