@@ -192,7 +192,7 @@ public isolated client class Provider {
         mistral:AssistantMessage message = choices[0].message;
         string|mistral:ContentChunk[]? content = message?.content;
         if content is mistral:TextChunk[]|mistral:DocumentURLChunk[]|mistral:ReferenceChunk[] {
-            return error ai:LlmError("Unsupported content type", cause = content);
+            return error("Unsupported content type", cause = content);
         }
         string? stringContent = ();
         if content is string && content.length() > 0 {
@@ -221,7 +221,7 @@ public isolated client class Provider {
             return {name: toolCall.'function.name, arguments, id: toolCall.id};
 
         } on fail error e {
-            return error ai:LlmError("Invalid or malformed arguments received in function call response.", e);
+            return error("Invalid or malformed arguments received in function call response.", e);
         }
     }
 }
