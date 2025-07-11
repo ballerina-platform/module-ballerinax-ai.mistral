@@ -67,7 +67,7 @@ public isolated client class ModelProvider {
             validation: connectionConfig.validation
         };
 
-        mistral:Client|error llmClient = new (mistralConfig);
+        mistral:Client|error llmClient = new (mistralConfig, serviceUrl);
         if llmClient is error {
             return error ai:Error("Failed to initialize MistralAiProvider", llmClient);
         }
