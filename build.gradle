@@ -60,7 +60,7 @@ allprojects {
 def moduleVersion = project.version.replace("-SNAPSHOT", "")
 
 task build {
-    dependsOn(':ai.model.provider.mistral-ballerina:build')
+    dependsOn(':ai.mistral-ballerina:build')
 }
 
 release {
