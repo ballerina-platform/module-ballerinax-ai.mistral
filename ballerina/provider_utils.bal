@@ -134,8 +134,8 @@ isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]
         }
     ];
 
-isolated function generateLlmResponse(mistral:Client llmClient, string apiKey, MISTRAL_AI_MODEL_NAMES modelType,
-        ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
+isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType, 
+        decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
     string chatContent = check generateChatCreationContent(prompt);
     ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
     mistral:Tool[]|error tools = getGetResultsTool(ResponseSchema.schema);
@@ -152,6 +152,8 @@ isolated function generateLlmResponse(mistral:Client llmClient, string apiKey, M
         ],
         model: modelType,
         tools,
+        temperature,
+        maxTokens,
         toolChoice: getGetResultsToolChoice()
     };
 

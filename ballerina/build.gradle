@@ -103,8 +103,8 @@ clean {
     delete 'build'
 }
 
-build.dependsOn ':ai.model.provider.mistral-native:build'
-build.dependsOn ":ai.model.provider.mistral-compiler-plugin:build"
+build.dependsOn ':ai.mistral-native:build'
+build.dependsOn ":ai.mistral-compiler-plugin:build"
 build.dependsOn "generatePomFileForMavenPublication"
 publishToMavenLocal.dependsOn build
 publish.dependsOn build

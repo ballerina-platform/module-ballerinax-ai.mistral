@@ -33,14 +33,14 @@ plugins {
 rootProject.name = 'module-ballerinax-ai.mistral'
 
 include ':checkstyle'
-include ':ai.model.provider.mistral-native'
-include ':ai.model.provider.mistral-ballerina'
-include ':ai.model.provider.mistral-compiler-plugin'
+include ':ai.mistral-native'
+include ':ai.mistral-ballerina'
+include ':ai.mistral-compiler-plugin'
 
 project(':checkstyle').projectDir = file("build-config${File.separator}checkstyle")
-project(':ai.model.provider.mistral-native').projectDir = file("native")
-project(':ai.model.provider.mistral-ballerina').projectDir = file("ballerina")
-project(':ai.model.provider.mistral-compiler-plugin').projectDir = file('compiler-plugin')
+project(':ai.mistral-native').projectDir = file("native")
+project(':ai.mistral-ballerina').projectDir = file("ballerina")
+project(':ai.mistral-compiler-plugin').projectDir = file('compiler-plugin')
 
 gradleEnterprise {
     buildScan {

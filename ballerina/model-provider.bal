@@ -248,9 +248,6 @@ public isolated client class ModelProvider {
         };
         return systemMessage;
     }
-
-    // TODO
-    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = external;
 }
 
 isolated function getChatMessageStringContent(ai:Prompt|string prompt) returns string|ai:Error {

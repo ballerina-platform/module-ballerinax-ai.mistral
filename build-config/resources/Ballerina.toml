@@ -13,6 +13,6 @@ graalvmCompatible = true
 
 [[platform.java21.dependency]]
 groupId = "io.ballerina.lib"
-artifactId = "ai.model.provider.mistral-native"
+artifactId = "ai.mistral-native"
 version = "@toml.version@"
-path = "../native/build/libs/ai.model.provider.mistral-native-@project.version@.jar"
+path = "../native/build/libs/ai.mistral-native-@project.version@.jar"
