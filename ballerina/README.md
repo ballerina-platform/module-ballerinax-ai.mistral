@@ -34,7 +34,7 @@ final ai:ModelProvider mistralModel = check new mistral:ModelProvider("mistralAp
 
 ### Step 4: Invoke chat completion
 
-```
+```ballerina
 ai:ChatMessage[] chatMessages = [{role: "user", content: "hi"}];
 ai:ChatAssistantMessage response = check mistralModel->chat(chatMessages, tools = []);
 
