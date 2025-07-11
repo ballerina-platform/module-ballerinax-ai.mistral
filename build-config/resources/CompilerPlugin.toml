@@ -1,0 +1,9 @@
+[plugin]
+id = "ai-mistral-compiler-plugin"
+class = "io.ballerina.lib.ai.mistral.AiMistralCompilerPlugin"
+
+[[dependency]]
+path = "../compiler-plugin/build/libs/ai.mistral-compiler-plugin-@project.version@.jar"
+
+[[dependency]]
+path = "../compiler-plugin/build/libs/ballerina-to-openapi-@ballerinaToOpenApiVersion.version@.jar"

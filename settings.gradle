@@ -7,6 +7,7 @@
 
 pluginManagement {
     plugins {
+        id "com.github.spotbugs-base" version "${spotbugsPluginVersion}"
         id "com.github.johnrengelman.shadow" version "${shadowJarPluginVersion}"
         id "de.undercouch.download" version "${downloadPluginVersion}"
         id "net.researchgate.release" version "${releasePluginVersion}"
@@ -29,11 +30,17 @@ plugins {
     id "com.gradle.enterprise" version "3.2"
 }
 
-rootProject.name = 'module-ballerinax-ai.model.provider.mistral'
+rootProject.name = 'module-ballerinax-ai.mistral'
 
-include ':ai.model.provider.mistral-ballerina'
+include ':checkstyle'
+include ':ai.mistral-native'
+include ':ai.mistral-ballerina'
+include ':ai.mistral-compiler-plugin'
 
-project(':ai.model.provider.mistral-ballerina').projectDir = file("ballerina")
+project(':checkstyle').projectDir = file("build-config${File.separator}checkstyle")
+project(':ai.mistral-native').projectDir = file("native")
+project(':ai.mistral-ballerina').projectDir = file("ballerina")
+project(':ai.mistral-compiler-plugin').projectDir = file('compiler-plugin')
 
 gradleEnterprise {
     buildScan {

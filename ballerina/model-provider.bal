@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/jballerina.java;
 import ballerina/lang.regexp;
 import ballerina/uuid;
 import ballerinax/mistral;
@@ -24,11 +25,12 @@ const DEFAULT_MAX_TOKEN_COUNT = 512;
 const DEFAULT_TEMPERATURE = 0.7d;
 
 # MistralAiProvider is a client class that provides an interface for interacting with Mistral AI Large Language Models.
-public isolated client class Provider {
+public isolated client class ModelProvider {
     *ai:ModelProvider;
     private final mistral:Client llmClient;
     private final string modelType;
-    private final string apiKey;
+    private final decimal temperature;
+    private final int maxTokens;
 
     # # Initializes the Mistral AI model with the given connection configuration and model configuration.
     #
@@ -65,26 +67,33 @@ public isolated client class Provider {
             validation: connectionConfig.validation
         };
 
-        mistral:Client|error llmClient = new (mistralConfig);
+        mistral:Client|error llmClient = new (mistralConfig, serviceUrl);
         if llmClient is error {
             return error ai:Error("Failed to initialize MistralAiProvider", llmClient);
         }
 
         self.llmClient = llmClient;
         self.modelType = modelType;
-        self.apiKey = apiKey;
+        self.temperature = temperature;
+        self.maxTokens = maxTokens;
     }
 
     # Uses function call API to determine next function to be called
     #
-    # + messages - List of chat messages 
+    # + messages - List of chat messages or a user message
     # + tools - Tool definitions to be used for the tool call
     # + stop - Stop sequence to stop the completion
     # + return - Returns an array of ai:ChatAssistantMessage or an ai:LlmError in case of failures
-    isolated remote function chat(ai:ChatMessage[] messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
-        returns ai:ChatAssistantMessage|ai:LlmError {
-        MistralMessages[] mistralMessages = self.mapToMistralMessageRecords(messages);
-        mistral:ChatCompletionRequest request = {model: self.modelType, stop, messages: mistralMessages};
+    isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
+        returns ai:ChatAssistantMessage|ai:Error {
+        MistralMessages[] mistralMessages = check self.mapToMistralMessageRecords(messages);
+        mistral:ChatCompletionRequest request = {
+            model: self.modelType,
+            stop,
+            messages: mistralMessages,
+            temperature: self.temperature,
+            maxTokens: self.maxTokens
+        };
 
         if tools.length() > 0 {
             mistral:Function[] mistralFunctions = [];
@@ -113,6 +122,16 @@ public isolated client class Provider {
         return self.getAssistantMessage(response);
     }
 
+    # Sends a chat request to the model and generates a value that belongs to the type
+    # corresponding to the type descriptor argument.
+    # 
+    # + prompt - The prompt to use in the chat messages
+    # + td - Type descriptor specifying the expected return type format
+    # + return - Generates a value that belongs to the type, or an error if generation fails
+    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = @java:Method {
+        'class: "io.ballerina.lib.ai.mistral.Generator"
+    } external;
+
     # Generates a random tool ID.
     #
     # + return - A random tool ID string
@@ -134,19 +153,16 @@ public isolated client class Provider {
         return randomToolId;
     }
 
-    # Maps an array of `ai:ChatMessage` records to corresponding Mistral message records.
-    #
-    # + messages - Array of chat messages to be converted
-    # + return - An `ai:LlmError` or an array of Mistral message records
-    private isolated function mapToMistralMessageRecords(ai:ChatMessage[] messages) returns MistralMessages[] {
+    private isolated function mapToMistralMessageRecords(ai:ChatMessage[]|ai:ChatUserMessage messages)
+    returns MistralMessages[]|ai:Error {
         MistralMessages[] mistralMessages = [];
+        if messages is ai:ChatUserMessage {
+            mistralMessages.push(check self.mapToMistralMessage(messages));
+            return mistralMessages;
+        }
         foreach ai:ChatMessage message in messages {
-            if message is ai:ChatUserMessage {
-                mistral:UserMessage userMessage = {role: ai:USER, content: message.content};
-                mistralMessages.push(userMessage);
-            } else if message is ai:ChatSystemMessage {
-                mistral:SystemMessage systemMessage = {role: ai:SYSTEM, content: message.content};
-                mistralMessages.push(systemMessage);
+            if message is ai:ChatUserMessage|ai:ChatSystemMessage {
+                mistralMessages.push(check self.mapToMistralMessage(message));
             } else if message is ai:ChatAssistantMessage {
                 ai:FunctionCall[]? toolCalls = message.toolCalls;
                 mistral:AssistantMessage mistralAssistantMessage = {role: ai:ASSISTANT, content: message.content};
@@ -156,7 +172,7 @@ public isolated client class Provider {
                     mistralAssistantMessage.toolCalls = toolCall;
                 }
                 mistralMessages.push(mistralAssistantMessage);
-            } else if message is ai:ChatFunctionMessage {
+            } else {
                 mistral:ToolMessage mistralToolMessage = {
                     role: "tool",
                     content: message.content,
@@ -181,7 +197,7 @@ public isolated client class Provider {
         mistral:AssistantMessage message = choices[0].message;
         string|mistral:ContentChunk[]? content = message?.content;
         if content is mistral:TextChunk[]|mistral:DocumentURLChunk[]|mistral:ReferenceChunk[] {
-            return error ai:LlmError("Unsupported content type", cause = content);
+            return error("Unsupported content type", cause = content);
         }
         string? stringContent = ();
         if content is string && content.length() > 0 {
@@ -210,7 +226,65 @@ public isolated client class Provider {
             return {name: toolCall.'function.name, arguments, id: toolCall.id};
 
         } on fail error e {
-            return error ai:LlmError("Invalid or malformed arguments received in function call response.", e);
+            return error("Invalid or malformed arguments received in function call response.", e);
         }
     }
+
+    private isolated function mapToMistralMessage(ai:ChatUserMessage|ai:ChatSystemMessage message)
+    returns mistral:UserMessage|mistral:SystemMessage|ai:Error {
+        if message is ai:ChatUserMessage {
+            mistral:UserMessage userMessage = {
+                role: ai:USER,
+                content: check getChatMessageStringContent(message.content)
+            };
+            return userMessage;
+        }
+
+        mistral:SystemMessage systemMessage = {
+            role: ai:SYSTEM,
+            content: check getChatMessageStringContent(message.content)
+        };
+        return systemMessage;
+    }
+}
+
+isolated function getChatMessageStringContent(ai:Prompt|string prompt) returns string|ai:Error {
+    if prompt is string {
+        return prompt;
+    }
+    string[] & readonly strings = prompt.strings;
+    anydata[] insertions = prompt.insertions;
+    string promptStr = strings[0];
+    foreach int i in 0 ..< insertions.length() {
+        string str = strings[i + 1];
+        anydata insertion = insertions[i];
+
+        if insertion is ai:TextDocument|ai:TextChunk {
+            promptStr += insertion.content + " " + str;
+            continue;
+        }
+
+        if insertion is ai:TextDocument[] {
+            foreach ai:TextDocument doc in insertion {
+                promptStr += doc.content + " ";
+            }
+            promptStr += str;
+            continue;
+        }
+
+        if insertion is ai:TextChunk[] {
+            foreach ai:TextChunk doc in insertion {
+                promptStr += doc.content + " ";
+            }
+            promptStr += str;
+            continue;
+        }
+
+        if insertion is ai:Document {
+            return error ai:Error("Only Text Documents are currently supported.");
+        }
+
+        promptStr += insertion.toString() + str;
+    }
+    return promptStr.trim();
 }

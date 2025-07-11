@@ -20,6 +20,7 @@ plugins {
     id 'com.github.johnrengelman.shadow'
     id 'de.undercouch.download'
     id 'net.researchgate.release'
+    id "com.github.spotbugs-base"
 }
 
 allprojects {
@@ -60,8 +61,13 @@ allprojects {
 def moduleVersion = project.version.replace("-SNAPSHOT", "")
 
 task build {
-    dependsOn(':ai.model.provider.mistral-ballerina:build')
+    dependsOn(':ai.mistral-native:build')
+    dependsOn ":ai.mistral-compiler-plugin:build"
+    dependsOn(':ai.mistral-ballerina:build')
 }
+
+tasks.findByPath(':ai.mistral-ballerina:build').mustRunAfter(':ai.mistral-native:build')
+
 
 release {
     buildTasks = ['build']
