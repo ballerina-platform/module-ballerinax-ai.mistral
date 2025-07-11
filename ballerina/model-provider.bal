@@ -81,13 +81,13 @@ public isolated client class ModelProvider {
 
     # Uses function call API to determine next function to be called
     #
-    # + messages - List of chat messages 
+    # + messages - List of chat messages or a user message
     # + tools - Tool definitions to be used for the tool call
     # + stop - Stop sequence to stop the completion
     # + return - Returns an array of ai:ChatAssistantMessage or an ai:LlmError in case of failures
-    isolated remote function chat(ai:ChatMessage[] messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
-        returns ai:ChatAssistantMessage|ai:LlmError {
-        MistralMessages[] mistralMessages = self.mapToMistralMessageRecords(messages);
+    isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
+        returns ai:ChatAssistantMessage|ai:Error {
+        MistralMessages[] mistralMessages = check self.mapToMistralMessageRecords(messages);
         mistral:ChatCompletionRequest request = {
             model: self.modelType,
             stop,
@@ -144,19 +144,16 @@ public isolated client class ModelProvider {
         return randomToolId;
     }
 
-    # Maps an array of `ai:ChatMessage` records to corresponding Mistral message records.
-    #
-    # + messages - Array of chat messages to be converted
-    # + return - An `ai:LlmError` or an array of Mistral message records
-    private isolated function mapToMistralMessageRecords(ai:ChatMessage[] messages) returns MistralMessages[] {
+    private isolated function mapToMistralMessageRecords(ai:ChatMessage[]|ai:ChatUserMessage messages)
+    returns MistralMessages[]|ai:Error {
         MistralMessages[] mistralMessages = [];
+        if messages is ai:ChatUserMessage {
+            mistralMessages.push(check self.mapToMistralMessage(messages));
+            return mistralMessages;
+        }
         foreach ai:ChatMessage message in messages {
-            if message is ai:ChatUserMessage {
-                mistral:UserMessage userMessage = {role: ai:USER, content: message.content};
-                mistralMessages.push(userMessage);
-            } else if message is ai:ChatSystemMessage {
-                mistral:SystemMessage systemMessage = {role: ai:SYSTEM, content: message.content};
-                mistralMessages.push(systemMessage);
+            if message is ai:ChatUserMessage|ai:ChatSystemMessage {
+                mistralMessages.push(check self.mapToMistralMessage(message));
             } else if message is ai:ChatAssistantMessage {
                 ai:FunctionCall[]? toolCalls = message.toolCalls;
                 mistral:AssistantMessage mistralAssistantMessage = {role: ai:ASSISTANT, content: message.content};
@@ -166,7 +163,7 @@ public isolated client class ModelProvider {
                     mistralAssistantMessage.toolCalls = toolCall;
                 }
                 mistralMessages.push(mistralAssistantMessage);
-            } else if message is ai:ChatFunctionMessage {
+            } else {
                 mistral:ToolMessage mistralToolMessage = {
                     role: "tool",
                     content: message.content,
@@ -223,4 +220,65 @@ public isolated client class ModelProvider {
             return error ai:LlmError("Invalid or malformed arguments received in function call response.", e);
         }
     }
+
+    private isolated function mapToMistralMessage(ai:ChatUserMessage|ai:ChatSystemMessage message)
+    returns mistral:UserMessage|mistral:SystemMessage|ai:Error {
+        if message is ai:ChatUserMessage {
+            mistral:UserMessage userMessage = {
+                role: ai:USER,
+                content: check getChatMessageStringContent(message.content)
+            };
+            return userMessage;
+        }
+
+        mistral:SystemMessage systemMessage = {
+            role: ai:SYSTEM,
+            content: check getChatMessageStringContent(message.content)
+        };
+        return systemMessage;
+    }
+
+    // TODO
+    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = external;
+}
+
+isolated function getChatMessageStringContent(ai:Prompt|string prompt) returns string|ai:Error {
+    if prompt is string {
+        return prompt;
+    }
+    string[] & readonly strings = prompt.strings;
+    anydata[] insertions = prompt.insertions;
+    string promptStr = strings[0];
+    foreach int i in 0 ..< insertions.length() {
+        string str = strings[i + 1];
+        anydata insertion = insertions[i];
+
+        if insertion is ai:TextDocument|ai:TextChunk {
+            promptStr += insertion.content + " " + str;
+            continue;
+        }
+
+        if insertion is ai:TextDocument[] {
+            foreach ai:TextDocument doc in insertion {
+                promptStr += doc.content + " ";
+            }
+            promptStr += str;
+            continue;
+        }
+
+        if insertion is ai:TextChunk[] {
+            foreach ai:TextChunk doc in insertion {
+                promptStr += doc.content + " ";
+            }
+            promptStr += str;
+            continue;
+        }
+
+        if insertion is ai:Document {
+            return error ai:Error("Only Text Documents are currently supported.");
+        }
+
+        promptStr += insertion.toString() + str;
+    }
+    return promptStr.trim();
 }
