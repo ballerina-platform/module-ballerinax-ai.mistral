@@ -24,7 +24,7 @@ plugins{
 
 description = 'Mistral Model Provider - Ballerina'
 
-def packageName = "ai.model.provider.mistral"
+def packageName = "ai.mistral"
 def packageOrg = "ballerinax"
 def tomlVersion = stripBallerinaExtensionVersion("${project.version}")
 def ballerinaTomlFilePlaceHolder = new File("${project.rootDir}/build-config/resources/Ballerina.toml")
@@ -103,8 +103,8 @@ clean {
     delete 'build'
 }
 
-build.dependsOn ':ai.model.provider.mistral-native:build'
-build.dependsOn ":ai.model.provider.mistral-compiler-plugin:build"
+build.dependsOn ':ai.mistral-native:build'
+build.dependsOn ":ai.mistral-compiler-plugin:build"
 build.dependsOn "generatePomFileForMavenPublication"
 publishToMavenLocal.dependsOn build
 publish.dependsOn build

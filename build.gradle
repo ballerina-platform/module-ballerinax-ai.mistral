@@ -61,12 +61,12 @@ allprojects {
 def moduleVersion = project.version.replace("-SNAPSHOT", "")
 
 task build {
-    dependsOn(':ai.model.provider.mistral-native:build')
-    dependsOn ":ai.model.provider.mistral-compiler-plugin:build"
-    dependsOn(':ai.model.provider.mistral-ballerina:build')
+    dependsOn(':ai.mistral-native:build')
+    dependsOn ":ai.mistral-compiler-plugin:build"
+    dependsOn(':ai.mistral-ballerina:build')
 }
 
-tasks.findByPath(':ai.model.provider.mistral-ballerina:build').mustRunAfter(':ai.model.provider.mistral-native:build')
+tasks.findByPath(':ai.mistral-ballerina:build').mustRunAfter(':ai.mistral-native:build')
 
 
 release {

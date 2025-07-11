@@ -22,6 +22,8 @@ service /llm on new http:Listener(8080) {
     // bug: https://github.com/ballerina-platform/ballerina-library/issues/8048
     resource function post chat/completions(@http:Payload json payload)returns mistral:ChatCompletionResponse|error {
         test:assertEquals(payload.model, MINISTRAL_8B_2410);
+        test:assertEquals(payload.temperature, 0.1d);
+        test:assertEquals(payload.max_tokens, 100);
 
         json[] messages = check payload.messages.ensureType();
         mistral:UserMessage message = check (messages[0]).fromJsonWithType();
