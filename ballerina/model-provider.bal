@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/jballerina.java;
 import ballerina/lang.regexp;
 import ballerina/uuid;
 import ballerinax/mistral;
@@ -121,6 +122,16 @@ public isolated client class ModelProvider {
         return self.getAssistantMessage(response);
     }
 
+    # Sends a chat request to the model and generates a value that belongs to the type
+    # corresponding to the type descriptor argument.
+    # 
+    # + prompt - The prompt to use in the chat messages
+    # + td - Type descriptor specifying the expected return type format
+    # + return - Generates a value that belongs to the type, or an error if generation fails
+    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = @java:Method {
+        'class: "io.ballerina.lib.ai.mistral.Generator"
+    } external;
+
     # Generates a random tool ID.
     #
     # + return - A random tool ID string
@@ -186,7 +197,7 @@ public isolated client class ModelProvider {
         mistral:AssistantMessage message = choices[0].message;
         string|mistral:ContentChunk[]? content = message?.content;
         if content is mistral:TextChunk[]|mistral:DocumentURLChunk[]|mistral:ReferenceChunk[] {
-            return error ai:LlmError("Unsupported content type", cause = content);
+            return error("Unsupported content type", cause = content);
         }
         string? stringContent = ();
         if content is string && content.length() > 0 {
@@ -215,7 +226,7 @@ public isolated client class ModelProvider {
             return {name: toolCall.'function.name, arguments, id: toolCall.id};
 
         } on fail error e {
-            return error ai:LlmError("Invalid or malformed arguments received in function call response.", e);
+            return error("Invalid or malformed arguments received in function call response.", e);
         }
     }
 
@@ -235,9 +246,6 @@ public isolated client class ModelProvider {
         };
         return systemMessage;
     }
-
-    // TODO
-    isolated remote function generate(ai:Prompt prompt, typedesc<anydata> td = <>) returns td|ai:Error = external;
 }
 
 isolated function getChatMessageStringContent(ai:Prompt|string prompt) returns string|ai:Error {
