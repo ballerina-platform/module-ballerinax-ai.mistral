@@ -29,7 +29,6 @@ public isolated client class ModelProvider {
     *ai:ModelProvider;
     private final mistral:Client llmClient;
     private final string modelType;
-    private final string apiKey;
     private final decimal temperature;
     private final int maxTokens;
 
@@ -75,7 +74,6 @@ public isolated client class ModelProvider {
 
         self.llmClient = llmClient;
         self.modelType = modelType;
-        self.apiKey = apiKey;
         self.temperature = temperature;
         self.maxTokens = maxTokens;
     }
