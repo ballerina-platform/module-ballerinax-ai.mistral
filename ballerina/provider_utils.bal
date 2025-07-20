@@ -15,12 +15,16 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/constraint;
+import ballerina/lang.array;
 import ballerinax/mistral;
 
 type ResponseSchema record {|
     map<json> schema;
     boolean isOriginallyJsonObject = true;
 |};
+
+type DocumentContentPart mistral:TextChunk|mistral:ImageURLChunk;
 
 const JSON_CONVERSION_ERROR = "FromJsonStringError";
 const CONVERSION_ERROR = "ConversionError";
@@ -76,35 +80,98 @@ isolated function getExpectedResponseSchema(typedesc<anydata> expectedResponseTy
     return generateJsonObjectSchema(check generateJsonSchemaForTypedescAsJson(td));
 }
 
-isolated function generateChatCreationContent(ai:Prompt prompt) returns string|ai:Error {
+isolated function generateChatCreationContent(ai:Prompt prompt)
+                        returns DocumentContentPart[]|ai:Error {
     string[] & readonly strings = prompt.strings;
     anydata[] insertions = prompt.insertions;
-    string promptStr = strings[0];
+    DocumentContentPart[] contentParts = [];
+    string accumulatedTextContent = "";
+
+    if strings.length() > 0 {
+        accumulatedTextContent += strings[0];
+    }
+
     foreach int i in 0 ..< insertions.length() {
-        string str = strings[i + 1];
         anydata insertion = insertions[i];
-
-        if insertion is ai:TextDocument {
-            promptStr += insertion.content + " " + str;
-            continue;
-        }
-
-        if insertion is ai:TextDocument[] {
-            foreach ai:TextDocument doc in insertion {
-                promptStr += doc.content  + " ";
-                
-            }
-            promptStr += str;
-            continue;
-        }
+        string str = strings[i + 1];
 
         if insertion is ai:Document {
-            return error ai:Error("Only Text Documents are currently supported.");
+            addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+            check addDocumentContentPart(insertion, contentParts);
+            accumulatedTextContent = "";
+        } else if insertion is ai:Document[] {
+            addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+            foreach ai:Document doc in insertion {
+                check addDocumentContentPart(doc, contentParts);
+            }
+            accumulatedTextContent = "";
+        } else {
+            accumulatedTextContent += insertion.toString();
         }
-
-        promptStr += insertion.toString() + str;
+        accumulatedTextContent += str;
     }
-    return promptStr.trim();
+
+    addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+    return contentParts;
+}
+
+isolated function addDocumentContentPart(ai:Document doc, DocumentContentPart[] contentParts) returns ai:Error? {
+    if doc is ai:TextDocument {
+        return addTextContentPart(buildTextContentPart(doc.content), contentParts);
+    } else if doc is ai:ImageDocument {
+        return contentParts.push(check buildImageContentPart(doc));
+    }
+    return error("Only text and image documents are supported.");
+}
+
+isolated function addTextContentPart(mistral:TextChunk? contentPart, DocumentContentPart[] contentParts) {
+    if contentPart is mistral:TextChunk {
+        return contentParts.push(contentPart);
+    }
+}
+
+isolated function buildTextContentPart(string content) returns mistral:TextChunk? {
+    if content.length() == 0 {
+        return;
+    }
+
+    return {
+        'type: "text",
+        text: content
+    };
+}
+
+isolated function buildImageContentPart(ai:ImageDocument doc) returns mistral:ImageURLChunk|ai:Error {
+    return {
+        imageUrl: {
+            url: check buildImageUrl(doc.content, doc.metadata?.mimeType)
+        }
+    };
+}
+
+isolated function buildImageUrl(ai:Url|byte[] content, string? mimeType) returns string|ai:Error {
+    if content is ai:Url {
+        ai:Url|constraint:Error validationRes = constraint:validate(content);
+        if validationRes is error {
+            return error(validationRes.message(), validationRes.cause());
+        }
+        return content;
+    }
+
+    if mimeType is () {
+        return error("Please specify the mimeType for the image document.");
+    }
+
+    return string `data:${mimeType};base64,${check getBase64EncodedString(content)}`;
+}
+
+isolated function getBase64EncodedString(byte[] content) returns string|ai:Error {
+    string|error binaryContent = array:toBase64(content);
+    if binaryContent is error {
+        return error("Failed to convert byte array to string: " + binaryContent.message() + ", " +
+                        binaryContent.detail().toBalString());
+    }
+    return binaryContent;
 }
 
 isolated function handleParseResponseError(error chatResponseError) returns error {
@@ -136,7 +203,7 @@ isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]
 
 isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType, 
         decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
-    string chatContent = check generateChatCreationContent(prompt);
+    DocumentContentPart[] chatContent = check generateChatCreationContent(prompt);
     ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
     mistral:Tool[]|error tools = getGetResultsTool(ResponseSchema.schema);
     if tools is error {
