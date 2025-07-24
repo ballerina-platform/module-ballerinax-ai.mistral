@@ -24,7 +24,7 @@ type ResponseSchema record {|
     boolean isOriginallyJsonObject = true;
 |};
 
-type DocumentContentPart mistral:TextChunk|mistral:ImageURLChunk;
+type DocumentContentPart mistral:TextChunk|mistral:ImageURLChunk|mistral:DocumentURLChunk;
 
 const JSON_CONVERSION_ERROR = "FromJsonStringError";
 const CONVERSION_ERROR = "ConversionError";
@@ -97,14 +97,14 @@ isolated function generateChatCreationContent(ai:Prompt prompt)
 
         if insertion is ai:Document {
             addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
-            check addDocumentContentPart(insertion, contentParts);
             accumulatedTextContent = "";
+            check addDocumentContentPart(insertion, contentParts);
         } else if insertion is ai:Document[] {
             addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+            accumulatedTextContent = "";
             foreach ai:Document doc in insertion {
                 check addDocumentContentPart(doc, contentParts);
             }
-            accumulatedTextContent = "";
         } else {
             accumulatedTextContent += insertion.toString();
         }
@@ -120,8 +120,10 @@ isolated function addDocumentContentPart(ai:Document doc, DocumentContentPart[] 
         return addTextContentPart(buildTextContentPart(doc.content), contentParts);
     } else if doc is ai:ImageDocument {
         return contentParts.push(check buildImageContentPart(doc));
+    } else if doc is ai:FileDocument {
+        return contentParts.push(check buildFileContentPart(doc));
     }
-    return error("Only text and image documents are supported.");
+    return error("Only text, image and file documents are supported.");
 }
 
 isolated function addTextContentPart(mistral:TextChunk? contentPart, DocumentContentPart[] contentParts) {
@@ -141,12 +143,31 @@ isolated function buildTextContentPart(string content) returns mistral:TextChunk
     };
 }
 
-isolated function buildImageContentPart(ai:ImageDocument doc) returns mistral:ImageURLChunk|ai:Error {
-    return {
-        imageUrl: {
-            url: check buildImageUrl(doc.content, doc.metadata?.mimeType)
-        }
-    };
+isolated function buildImageContentPart(ai:ImageDocument doc) returns mistral:ImageURLChunk|ai:Error =>
+    {
+    imageUrl: {
+        url: check buildImageUrl(doc.content, doc.metadata?.mimeType)
+    }
+};
+
+isolated function buildFileContentPart(ai:FileDocument doc) returns mistral:DocumentURLChunk|ai:Error {
+    byte[]|ai:Url|ai:FileId content = doc.content;
+    if content !is ai:Url {
+        return error("Currently, only URL based file documents are supported.");
+    }
+
+    ai:Url|constraint:Error validationRes = constraint:validate(content);
+    if validationRes is error {
+        return error(validationRes.message(), validationRes.cause());
+    }
+
+    string? fileName = doc.metadata?.fileName;
+    return fileName is () ? {
+            documentUrl: content
+        } : {
+            documentUrl: content,
+            documentName: fileName
+        };
 }
 
 isolated function buildImageUrl(ai:Url|byte[] content, string? mimeType) returns string|ai:Error {
@@ -191,17 +212,17 @@ isolated function getGetResultsToolChoice() returns mistral:ToolChoice => {
 
 isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]|error =>
     [
-        {
-            'function: {
-                name: GET_RESULTS_TOOL,
-                parameters: check parameters.cloneWithType(),
-                strict: false,
-                description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
-            }
+    {
+        'function: {
+            name: GET_RESULTS_TOOL,
+            parameters: check parameters.cloneWithType(),
+            strict: false,
+            description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
         }
-    ];
+    }
+];
 
-isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType, 
+isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType,
         decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
     DocumentContentPart[] chatContent = check generateChatCreationContent(prompt);
     ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
@@ -242,7 +263,7 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
     }
 
     mistral:ToolCall tool = toolCalls[0];
-    string|record{} toolArguments = tool.'function.arguments;
+    string|record {} toolArguments = tool.'function.arguments;
 
     if toolArguments == "" || toolArguments == {} {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
@@ -264,10 +285,9 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
             return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
                 expectedResponseTypedesc.toBalString()}', found '${(typeof response).toBalString()}'`);
         }
-        
+
         return result;
     } on fail error e {
         return error("Invalid or malformed arguments received in function call response.", e);
     }
 }
-

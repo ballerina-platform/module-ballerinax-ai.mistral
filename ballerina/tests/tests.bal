@@ -22,8 +22,9 @@ const API_KEY = "not-a-real-api-key";
 const ERROR_MESSAGE = "Error occurred while attempting to parse the response from the LLM as the expected type. Retrying and/or validating the prompt could fix the response.";
 const RUNTIME_SCHEMA_NOT_SUPPORTED_ERROR_MESSAGE = "Runtime schema generation is not yet supported";
 
-final ModelProvider mistralProvider = check new (API_KEY, MINISTRAL_8B_2410, 
-        SERVICE_URL, maxTokens = 100, temperature = 0.1);
+final ModelProvider mistralProvider = check new (API_KEY, MINISTRAL_8B_2410,
+    SERVICE_URL, maxTokens = 100, temperature = 0.1
+);
 
 @test:Config
 function testGenerateMethodWithBasicReturnType() returns ai:Error? {
@@ -81,11 +82,11 @@ function testGenerateMethodWithTextDocumentArray() returns error? {
 @test:Config
 function testGenerateMethodWithImageDocumentWithBinaryData() returns ai:Error? {
     ai:ImageDocument img = {
-        content: imageBinaryData
+        content: sampleBinaryData
     };
 
     ai:ImageDocument img2 = {
-        content: imageBinaryData,
+        content: sampleBinaryData,
         metadata: {
             mimeType: "image/png"
         }
@@ -130,7 +131,7 @@ function testGenerateMethodWithImageDocumentWithInvalidUrl() returns ai:Error? {
 @test:Config
 function testGenerateMethodWithImageDocumentArray() returns ai:Error? {
     ai:ImageDocument img = {
-        content: imageBinaryData,
+        content: sampleBinaryData,
         metadata: {
             mimeType: "image/png"
         }
@@ -147,7 +148,7 @@ function testGenerateMethodWithImageDocumentArray() returns ai:Error? {
 @test:Config
 function testGenerateMethodWithTextAndImageDocumentArray() returns ai:Error? {
     ai:ImageDocument img = {
-        content: imageBinaryData,
+        content: sampleBinaryData,
         metadata: {
             mimeType: "image/png"
         }
@@ -164,7 +165,7 @@ function testGenerateMethodWithTextAndImageDocumentArray() returns ai:Error? {
 @test:Config
 function testGenerateMethodWithImageDocumentsandTextDocuments() returns ai:Error? {
     ai:ImageDocument img = {
-        content: imageBinaryData,
+        content: sampleBinaryData,
         metadata: {
             mimeType: "image/png"
         }
@@ -187,7 +188,57 @@ function testGenerateMethodWithUnsupportedDocument() returns ai:Error? {
 
     string[]|error descriptions = mistralProvider->generate(`What is the content in this document. ${doc}.`);
     test:assertTrue(descriptions is error);
-    test:assertTrue((<error>descriptions).message().includes("Only text and image documents are supported."));
+    test:assertTrue((<error>descriptions).message().includes("Only text, image and file documents are supported."));
+}
+
+@test:Config
+function testFileDocument() returns ai:Error? {
+    ai:FileDocument pdf = {
+        content: {fileId: "<file-id>"}
+    };
+
+    ai:FileDocument pdf2 = {
+        content: sampleBinaryData
+    };
+
+    ai:FileDocument pdf3 = {
+        content: "https://sampleurl.com"
+    };
+
+    ai:FileDocument pdf4 = {
+        metadata: {
+            fileName: "sample.pdf"
+        },
+        content: "https://sampleurl.com"
+    };
+
+    ai:FileDocument pdf5 = {
+        content: "<invalid-url>"
+    };
+
+    string|error description = mistralProvider->generate(`Describe the following pdf content. ${pdf4}.`);
+    test:assertEquals(description, "This is a sample pdf description.");
+
+    string[]|error descriptions = mistralProvider->generate(`Describe the following pdf files. ${<ai:FileDocument[]>[pdf3, pdf3]}.`);
+    test:assertEquals(descriptions, ["This is a sample pdf description.", "This is a sample pdf description."]);
+
+    description = mistralProvider->generate(`Describe the following pdf file. ${pdf5}.`);
+    if description is string {
+        test:assertFail("Expected an error for invalid URL in the file document.");
+    }
+    test:assertEquals(description.message(), "Must be a valid URL.");
+
+    description = mistralProvider->generate(`Describe the following pdf file. ${pdf2}.`);
+    if description is string {
+        test:assertFail("Expected an error for unsupported content type in the file document.");
+    }
+    test:assertEquals(description.message(), "Currently, only URL based file documents are supported.");
+
+    description = mistralProvider->generate(`Describe the following pdf file. ${pdf}.`);
+    if description is string {
+        test:assertFail("Expected an error for invalid URL in the file document.");
+    }
+    test:assertEquals(description.message(), "Currently, only URL based file documents are supported.");
 }
 
 @test:Config
@@ -218,7 +269,7 @@ function testGenerateMethodWithInvalidRecordType() returns ai:Error? {
     string msg = (<error>rating).message();
     test:assertTrue(rating is error);
     test:assertTrue(msg.includes(RUNTIME_SCHEMA_NOT_SUPPORTED_ERROR_MESSAGE),
-        string `expected error message to contain: ${RUNTIME_SCHEMA_NOT_SUPPORTED_ERROR_MESSAGE}, but found ${msg}`);
+            string `expected error message to contain: ${RUNTIME_SCHEMA_NOT_SUPPORTED_ERROR_MESSAGE}, but found ${msg}`);
 }
 
 type ProductNameArray ProductName[];

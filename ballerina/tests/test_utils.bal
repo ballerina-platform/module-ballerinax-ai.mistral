@@ -77,6 +77,14 @@ isolated function getExpectedParameterSchema(string message) returns map<json> {
         return expectedParameterSchemaStringForRateBlog8;
     }
 
+    if message.startsWith("Describe the following pdf content") {
+        return expectedParameterSchemaStringForRateBlog8;
+    }
+
+    if message.startsWith("Describe the following pdf files") {
+        return expectedParameterSchemaStringForRateBlog7;
+    }
+
     if message.startsWith("Describe the image") {
         return expectedParameterSchemaStringForRateBlog8;
     }
@@ -142,8 +150,15 @@ isolated function getTheMockLLMResult(string message) returns map<json> {
     }
 
     if message.startsWith("Who is a popular sportsperson") {
-        return {result: {firstName: "Simone", middleName: null, 
-            lastName: "Biles", yearOfBirth: 1997, sport: "Gymnastics"}};
+        return {
+            result: {
+                firstName: "Simone",
+                middleName: null,
+                lastName: "Biles",
+                yearOfBirth: 1997,
+                sport: "Gymnastics"
+            }
+        };
     }
 
     if message.startsWith("How would you rate these text blogs") {
@@ -184,6 +199,14 @@ isolated function getTheMockLLMResult(string message) returns map<json> {
 
     if message.startsWith("Please describe the image") {
         return {result: "This is a sample image description."};
+    }
+
+    if message.startsWith("Describe the following pdf content") {
+        return {result: "This is a sample pdf description."};
+    }
+
+    if message.startsWith("Describe the following pdf files") {
+        return {result: ["This is a sample pdf description.", "This is a sample pdf description."]};
     }
 
     return {};
@@ -247,7 +270,7 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${imageStr}`
+                    "url": string `data:image/png;base64,${sampleBase64Str}`
                 }
             },
             {
@@ -266,12 +289,39 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${imageStr}`
+                    "url": string `data:image/png;base64,${sampleBase64Str}`
                 }
             },
             {
                 "type": "text",
                 "text": string `Title: ${blog1.title} Content: ${blog1.content}`
+            },
+            {"type": "text", "text": "."}
+        ];
+    }
+
+    if message.startsWith("Describe the following pdf content") {
+        return [
+            {"type": "text", "text": "Describe the following pdf content. "},
+            {
+                "type": "document_url",
+                "document_url": "https://sampleurl.com",
+                "document_name": "sample.pdf"
+            },
+            {"type": "text", "text": "."}
+        ];
+    }
+
+    if message.startsWith("Describe the following pdf files") {
+        return [
+            {"type": "text", "text": "Describe the following pdf files. "},
+            {
+                "type": "document_url",
+                "document_url": "https://sampleurl.com"
+            },
+            {
+                "type": "document_url",
+                "document_url": "https://sampleurl.com"
             },
             {"type": "text", "text": "."}
         ];
@@ -283,7 +333,7 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${imageStr}`
+                    "url": string `data:image/png;base64,${sampleBase64Str}`
                 }
             },
             {
@@ -299,7 +349,7 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": string `data:image/png;base64,${imageStr}`
+                    "url": string `data:image/png;base64,${sampleBase64Str}`
                 }
             },
             {"type": "text", "text": "."}
@@ -342,17 +392,21 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
 
 isolated function getTestServiceResponse(string content) returns mistral:ChatCompletionResponse =>
     {
-        choices: [{
+    choices: [
+        {
             index: 0,
             finishReason: "tool_calls",
             message: {
                 role: "assistant",
-                toolCalls: [{
-                    'function: {
-                        name: GET_RESULTS_TOOL,
-                        arguments: getTheMockLLMResult(content)
+                toolCalls: [
+                    {
+                        'function: {
+                            name: GET_RESULTS_TOOL,
+                            arguments: getTheMockLLMResult(content)
+                        }
                     }
-                }]
+                ]
             }
-        }]
-    };
+        }
+    ]
+};
