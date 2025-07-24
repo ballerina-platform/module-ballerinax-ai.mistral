@@ -233,7 +233,7 @@ const expectedParameterSchemaForArrayUnionRec =
         }
     };
 
-    const expectedParameterSchemaForArrayUnionBasicType =
+const expectedParameterSchemaForArrayUnionBasicType =
     {
         "type": "object",
         "properties": {
