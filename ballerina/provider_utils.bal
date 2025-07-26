@@ -15,12 +15,16 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/constraint;
+import ballerina/lang.array;
 import ballerinax/mistral;
 
 type ResponseSchema record {|
     map<json> schema;
     boolean isOriginallyJsonObject = true;
 |};
+
+type DocumentContentPart mistral:TextChunk|mistral:ImageURLChunk|mistral:DocumentURLChunk;
 
 const JSON_CONVERSION_ERROR = "FromJsonStringError";
 const CONVERSION_ERROR = "ConversionError";
@@ -76,35 +80,119 @@ isolated function getExpectedResponseSchema(typedesc<anydata> expectedResponseTy
     return generateJsonObjectSchema(check generateJsonSchemaForTypedescAsJson(td));
 }
 
-isolated function generateChatCreationContent(ai:Prompt prompt) returns string|ai:Error {
+isolated function generateChatCreationContent(ai:Prompt prompt)
+                        returns DocumentContentPart[]|ai:Error {
     string[] & readonly strings = prompt.strings;
     anydata[] insertions = prompt.insertions;
-    string promptStr = strings[0];
+    DocumentContentPart[] contentParts = [];
+    string accumulatedTextContent = "";
+
+    if strings.length() > 0 {
+        accumulatedTextContent += strings[0];
+    }
+
     foreach int i in 0 ..< insertions.length() {
-        string str = strings[i + 1];
         anydata insertion = insertions[i];
-
-        if insertion is ai:TextDocument {
-            promptStr += insertion.content + " " + str;
-            continue;
-        }
-
-        if insertion is ai:TextDocument[] {
-            foreach ai:TextDocument doc in insertion {
-                promptStr += doc.content  + " ";
-                
-            }
-            promptStr += str;
-            continue;
-        }
+        string str = strings[i + 1];
 
         if insertion is ai:Document {
-            return error ai:Error("Only Text Documents are currently supported.");
+            addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+            accumulatedTextContent = "";
+            check addDocumentContentPart(insertion, contentParts);
+        } else if insertion is ai:Document[] {
+            addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+            accumulatedTextContent = "";
+            foreach ai:Document doc in insertion {
+                check addDocumentContentPart(doc, contentParts);
+            }
+        } else {
+            accumulatedTextContent += insertion.toString();
         }
-
-        promptStr += insertion.toString() + str;
+        accumulatedTextContent += str;
     }
-    return promptStr.trim();
+
+    addTextContentPart(buildTextContentPart(accumulatedTextContent), contentParts);
+    return contentParts;
+}
+
+isolated function addDocumentContentPart(ai:Document doc, DocumentContentPart[] contentParts) returns ai:Error? {
+    if doc is ai:TextDocument {
+        return addTextContentPart(buildTextContentPart(doc.content), contentParts);
+    } else if doc is ai:ImageDocument {
+        return contentParts.push(check buildImageContentPart(doc));
+    } else if doc is ai:FileDocument {
+        return contentParts.push(check buildFileContentPart(doc));
+    }
+    return error("Only text, image and file documents are supported.");
+}
+
+isolated function addTextContentPart(mistral:TextChunk? contentPart, DocumentContentPart[] contentParts) {
+    if contentPart is mistral:TextChunk {
+        return contentParts.push(contentPart);
+    }
+}
+
+isolated function buildTextContentPart(string content) returns mistral:TextChunk? {
+    if content.length() == 0 {
+        return;
+    }
+
+    return {
+        'type: "text",
+        text: content
+    };
+}
+
+isolated function buildImageContentPart(ai:ImageDocument doc) returns mistral:ImageURLChunk|ai:Error =>
+    {
+    imageUrl: {
+        url: check buildImageUrl(doc.content, doc.metadata?.mimeType)
+    }
+};
+
+isolated function buildFileContentPart(ai:FileDocument doc) returns mistral:DocumentURLChunk|ai:Error {
+    byte[]|ai:Url|ai:FileId content = doc.content;
+    if content !is ai:Url {
+        return error("Currently, only URL based file documents are supported.");
+    }
+
+    ai:Url|constraint:Error validationRes = constraint:validate(content);
+    if validationRes is error {
+        return error(validationRes.message(), validationRes.cause());
+    }
+
+    string? fileName = doc.metadata?.fileName;
+    return fileName is () ? {
+            documentUrl: content
+        } : {
+            documentUrl: content,
+            documentName: fileName
+        };
+}
+
+isolated function buildImageUrl(ai:Url|byte[] content, string? mimeType) returns string|ai:Error {
+    if content is ai:Url {
+        ai:Url|constraint:Error validationRes = constraint:validate(content);
+        if validationRes is error {
+            return error(validationRes.message(), validationRes.cause());
+        }
+        return content;
+    }
+
+    if mimeType is () {
+        return error("Please specify the mimeType for the image document.");
+    }
+
+    return string `data:${mimeType};base64,${check getBase64EncodedString(content)}`;
+}
+
+isolated function getBase64EncodedString(byte[] content) returns string|ai:Error {
+    string|error binaryContent = array:toBase64(content);
+    if binaryContent is error {
+        return error("Failed to convert byte array to string: " + binaryContent.message() + ", " +
+                        binaryContent.detail().toBalString());
+    }
+    return binaryContent;
 }
 
 isolated function handleParseResponseError(error chatResponseError) returns error {
@@ -124,19 +212,19 @@ isolated function getGetResultsToolChoice() returns mistral:ToolChoice => {
 
 isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]|error =>
     [
-        {
-            'function: {
-                name: GET_RESULTS_TOOL,
-                parameters: check parameters.cloneWithType(),
-                strict: false,
-                description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
-            }
+    {
+        'function: {
+            name: GET_RESULTS_TOOL,
+            parameters: check parameters.cloneWithType(),
+            strict: false,
+            description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
         }
-    ];
+    }
+];
 
-isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType, 
+isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType,
         decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
-    string chatContent = check generateChatCreationContent(prompt);
+    DocumentContentPart[] chatContent = check generateChatCreationContent(prompt);
     ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
     mistral:Tool[]|error tools = getGetResultsTool(ResponseSchema.schema);
     if tools is error {
@@ -175,7 +263,7 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
     }
 
     mistral:ToolCall tool = toolCalls[0];
-    string|record{} toolArguments = tool.'function.arguments;
+    string|record {} toolArguments = tool.'function.arguments;
 
     if toolArguments == "" || toolArguments == {} {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
@@ -197,10 +285,9 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
             return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
                 expectedResponseTypedesc.toBalString()}', found '${(typeof response).toBalString()}'`);
         }
-        
+
         return result;
     } on fail error e {
         return error("Invalid or malformed arguments received in function call response.", e);
     }
 }
-

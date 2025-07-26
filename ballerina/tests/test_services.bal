@@ -26,13 +26,11 @@ service /llm on new http:Listener(8080) {
         test:assertEquals(payload.max_tokens, 100);
 
         json[] messages = check payload.messages.ensureType();
-        mistral:UserMessage message = check (messages[0]).fromJsonWithType();
-        string? content = check message.content.ensureType();
-        if content is () {
-            test:assertFail("Expected content in the payload");
-        }
-
-        test:assertEquals(content, getExpectedPrompt(content));
+        map<json> message = check (messages[0]).fromJsonWithType();
+        json[] content = check message.content.ensureType();
+        mistral:TextChunk initialTextContent = check content[0].fromJsonWithType();
+        string initialText = initialTextContent.text;
+        test:assertEquals(content, getExpectedContentParts(initialText));
         test:assertEquals(message.role, "user");
         json[]? tools = check payload?.tools.ensureType();
         if tools is () || tools.length() == 0 {
@@ -42,10 +40,10 @@ service /llm on new http:Listener(8080) {
         mistral:Tool tool = check tools[0].fromJsonWithType();
         record {} parameters = tool.'function.parameters;
         if parameters == {} {
-            test:assertFail("No parameters in the expected tool in the test with content: " + content);
+            test:assertFail("No parameters in the expected tool in the test with content: " + initialText);
         }
 
-        test:assertEquals(parameters, getExpectedParameterSchema(content));
-        return getTestServiceResponse(content);
+        test:assertEquals(parameters, getExpectedParameterSchema(initialText));
+        return getTestServiceResponse(initialText);
     }
 }
