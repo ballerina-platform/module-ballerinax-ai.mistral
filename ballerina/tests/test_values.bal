@@ -44,6 +44,10 @@ const blog2 = {
 
 const review = {"rating": 8, "comment": "Talks about essential aspects of sports performance " +
         "including warm-up, form, equipment, and nutrition."};
+const reviewRecord = {
+    rating: 8,
+    comment: "Talks about essential aspects of sports performance including warm-up, form, equipment, and nutrition."
+};
 
 final string expectedPromptStringForRateBlog = string `Rate this blog out of 10.
         Title: ${blog1.title}
