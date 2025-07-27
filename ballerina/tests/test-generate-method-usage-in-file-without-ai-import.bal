@@ -21,5 +21,5 @@ function testGenerateMethodUsageInFileWithoutAiImport() returns error? {
     Review|error result = mistralProvider->generate(`Please rate this blog out of ${"10"}.
         Title: ${blog2.title}
         Content: ${blog2.content}`);
-    test:assertEquals(result, reviewRecord);
+    test:assertEquals(result, review);
 }
