@@ -18,6 +18,7 @@ import ballerina/ai;
 import ballerina/constraint;
 import ballerina/lang.array;
 import ballerinax/mistral;
+import ballerina/lang.runtime;
 
 type ResponseSchema record {|
     map<json> schema;
@@ -221,12 +222,13 @@ isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]
         }
     }
 ];
-
 isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType,
-        decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
+        decimal temperature, ai:GeneratorConfig generatorConfig, 
+        ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
+    
     DocumentContentPart[] chatContent = check generateChatCreationContent(prompt);
-    ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
-    mistral:Tool[]|error tools = getGetResultsTool(ResponseSchema.schema);
+    ResponseSchema responseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
+    mistral:Tool[]|error tools = getGetResultsTool(responseSchema.schema);
     if tools is error {
         return error("Error while generating the tool: " + tools.message());
     }
@@ -244,7 +246,15 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
         maxTokens,
         toolChoice: getGetResultsToolChoice()
     };
+    
+    [int, decimal] [count, interval] = check getRetryConfigValues(generatorConfig);
 
+    return getLlmResponse(llmClient, request, expectedResponseTypedesc, responseSchema.isOriginallyJsonObject, count, interval);
+}
+
+isolated function getLlmResponse(mistral:Client llmClient, mistral:ChatCompletionRequest request,
+        typedesc<anydata> expectedResponseTypedesc, boolean isOriginallyJsonObject, int retryCount, decimal retryInterval) returns anydata|ai:Error {
+    
     mistral:ChatCompletionResponse|error response = llmClient->/chat/completions.post(request);
     if response is error {
         return error ai:LlmConnectionError("Error while connecting to the model", response);
@@ -257,37 +267,73 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
     mistral:AssistantMessage message = choices[0].message;
 
     mistral:ToolCall[]? toolCalls = message?.toolCalls;
-
-    if toolCalls == () || toolCalls.length() == 0 {
+    if toolCalls is () || toolCalls.length() == 0 {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
     }
 
     mistral:ToolCall tool = toolCalls[0];
     string|record {} toolArguments = tool.'function.arguments;
 
-    if toolArguments == "" || toolArguments == {} {
+    if toolArguments is "" {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
     }
+    
+    mistral:AgentsCompletionRequestMessages[] history = request.messages;
+    history.push(message);
 
-    do {
-        json jsonArgs = toolArguments is string ? check toolArguments.fromJsonString() : toolArguments.toJson();
-        map<json>? arguments = check jsonArgs.cloneWithType();
-
-        anydata|error res = parseResponseAsType(arguments.toJsonString(), expectedResponseTypedesc,
-                ResponseSchema.isOriginallyJsonObject);
-        if res is error {
-            return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
-                expectedResponseTypedesc.toBalString()}', found '${res.toBalString()}'`);
+    anydata|error result = handleResponseWithExpectedType(toolArguments.toString(), isOriginallyJsonObject,
+                    expectedResponseTypedesc);
+    
+    if result is error && retryCount > 0 {
+        string|error repairMessage = getRepairMessage(result, tool.id, tool.'function.name);
+        if repairMessage is error {
+            return error("Failed to generate a valid response: " + repairMessage.message());
         }
 
-        anydata|error result = res.ensureType(expectedResponseTypedesc);
-        if result is error {
-            return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
-                expectedResponseTypedesc.toBalString()}', found '${(typeof response).toBalString()}'`);
-        }
-
-        return result;
-    } on fail error e {
-        return error("Invalid or malformed arguments received in function call response.", e);
+        history.push({role: "user", content: repairMessage});
+        runtime:sleep(retryInterval);
+        return getLlmResponse(llmClient, request, expectedResponseTypedesc, isOriginallyJsonObject, retryCount - 1, retryInterval);
     }
+
+    if result is anydata {
+        return result;
+    }
+
+    return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
+            expectedResponseTypedesc.toBalString()}', found '${result.toBalString()}'`);
+}
+
+isolated function handleResponseWithExpectedType(string arguments, boolean isOriginallyJsonObject,
+                                typedesc<anydata> expectedResponseTypedesc) returns anydata|error {
+    anydata res = check parseResponseAsType(arguments, expectedResponseTypedesc, isOriginallyJsonObject);
+    return res.ensureType(expectedResponseTypedesc);
+}
+
+isolated function getRepairMessage(error e, string toolId, string functionName) returns string|error {
+    error? cause = e.cause();
+    if cause is () {
+        return e;
+    }
+
+    return string `The tool call with ${toolId != "null" ? string `ID '${toolId}' for the ` : ""}function '${functionName}' failed.
+        Error: ${cause.toString()}
+        You must correct the function arguments based on this error and respond with a valid tool call.`;
+}
+
+isolated function getRetryConfigValues(ai:GeneratorConfig generatorConfig) returns [int, decimal]|ai:Error {
+    ai:RetryConfig? retryConfig = generatorConfig.retryConfig;
+    if retryConfig != () {
+        int count = retryConfig.count;
+        decimal? interval = retryConfig.interval;
+
+        if count < 0 {
+            return error("Invalid retry count: " + count.toString());
+        }
+        if interval < 0d {
+            return error("Invalid retry interval: " + interval.toString());
+        }
+
+        return [count, interval ?: 0d];
+    }
+    return [0, 0d];
 }
