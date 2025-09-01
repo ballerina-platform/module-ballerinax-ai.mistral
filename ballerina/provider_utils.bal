@@ -249,11 +249,13 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
     
     [int, decimal] [count, interval] = check getRetryConfigValues(generatorConfig);
 
-    return getLlmResponse(llmClient, request, expectedResponseTypedesc, responseSchema.isOriginallyJsonObject, count, interval);
+    return getLlmResponse(llmClient, request, expectedResponseTypedesc, 
+            responseSchema.isOriginallyJsonObject, count, interval);
 }
 
 isolated function getLlmResponse(mistral:Client llmClient, mistral:ChatCompletionRequest request,
-        typedesc<anydata> expectedResponseTypedesc, boolean isOriginallyJsonObject, int retryCount, decimal retryInterval) returns anydata|ai:Error {
+        typedesc<anydata> expectedResponseTypedesc, boolean isOriginallyJsonObject, 
+        int retryCount, decimal retryInterval) returns anydata|ai:Error {
     
     mistral:ChatCompletionResponse|error response = llmClient->/chat/completions.post(request);
     if response is error {
@@ -292,7 +294,8 @@ isolated function getLlmResponse(mistral:Client llmClient, mistral:ChatCompletio
 
         history.push({role: "user", content: repairMessage});
         runtime:sleep(retryInterval);
-        return getLlmResponse(llmClient, request, expectedResponseTypedesc, isOriginallyJsonObject, retryCount - 1, retryInterval);
+        return getLlmResponse(llmClient, request, expectedResponseTypedesc, 
+            isOriginallyJsonObject, retryCount - 1, retryInterval);
     }
 
     if result is anydata {
