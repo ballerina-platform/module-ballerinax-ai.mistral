@@ -267,14 +267,14 @@ isolated function getLlmResponse(mistral:Client llmClient, mistral:ChatCompletio
     mistral:AssistantMessage message = choices[0].message;
 
     mistral:ToolCall[]? toolCalls = message?.toolCalls;
-    if toolCalls is () || toolCalls.length() == 0 {
+    if toolCalls == () || toolCalls.length() == 0 {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
     }
 
     mistral:ToolCall tool = toolCalls[0];
     string|record {} toolArguments = tool.'function.arguments;
 
-    if toolArguments is "" {
+    if toolArguments == "" || toolArguments == {} {
         return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
     }
     
