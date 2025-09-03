@@ -23,7 +23,7 @@ service /llm on new http:Listener(8080) {
 
     resource function post chat/completions(@http:Payload json payload) returns mistral:ChatCompletionResponse|error {
         [string, json[]] [initialText, _] = check validateInitialMistralPayload(payload);
-        return check getTestServiceResponse(initialText, 0);
+        return getTestServiceResponse(initialText, 0);
     }
 
     resource function post retry\-test/chat/completions(@http:Payload json payload) returns mistral:ChatCompletionResponse|error {
@@ -42,7 +42,7 @@ service /llm on new http:Listener(8080) {
         }
 
         check assertContentParts(messages, initialText, index);
-        return check getTestServiceResponse(initialText, index);
+        return getTestServiceResponse(initialText, index);
     }
 }
 
