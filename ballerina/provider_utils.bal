@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/ai.observe;
 import ballerina/constraint;
 import ballerina/lang.array;
 import ballerinax/mistral;
@@ -210,25 +211,38 @@ isolated function getGetResultsToolChoice() returns mistral:ToolChoice => {
     }
 };
 
-isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]|error =>
-    [
-    {
-        'function: {
-            name: GET_RESULTS_TOOL,
-            parameters: check parameters.cloneWithType(),
-            strict: false,
-            description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
-        }
+isolated function getGetResultsTool(map<json> parameters) returns mistral:Tool[]|ai:Error {
+    record {}|error toolParams = parameters.cloneWithType();
+    if toolParams is error {
+        return error("Error in generated schema: " + toolParams.message());
     }
-];
+    return [
+        {
+            'function: {
+                name: GET_RESULTS_TOOL,
+                parameters: toolParams,
+                strict: false,
+                description: "Tool to call with the resp onse from a large language model (LLM) for a user prompt."
+            }
+        }
+    ];
+}
 
 isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, MISTRAL_AI_MODEL_NAMES modelType,
         decimal temperature, ai:Prompt prompt, typedesc<json> expectedResponseTypedesc) returns anydata|ai:Error {
-    DocumentContentPart[] chatContent = check generateChatCreationContent(prompt);
-    ResponseSchema ResponseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
-    mistral:Tool[]|error tools = getGetResultsTool(ResponseSchema.schema);
-    if tools is error {
-        return error("Error while generating the tool: " + tools.message());
+    observe:GenerateContentSpan span = observe:createGenerateContentSpan(modelType);
+    span.addProvider("mistral_ai");
+
+    DocumentContentPart[] chatContent;
+    ResponseSchema responseSchema;
+    mistral:Tool[] tools;
+    do {
+        chatContent = check generateChatCreationContent(prompt);
+        responseSchema = check getExpectedResponseSchema(expectedResponseTypedesc);
+        tools = check getGetResultsTool(responseSchema.schema);
+    } on fail ai:Error err {
+        span.close(err);
+        return err;
     }
 
     mistral:ChatCompletionRequest request = {
@@ -244,29 +258,49 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
         maxTokens,
         toolChoice: getGetResultsToolChoice()
     };
-
+    span.addInputMessages(request.messages.toJson());
     mistral:ChatCompletionResponse|error response = llmClient->/chat/completions.post(request);
     if response is error {
-        return error ai:LlmConnectionError("Error while connecting to the model", response);
+        ai:Error err = error ai:LlmConnectionError("Error while connecting to the model", response);
+        span.close(err);
+        return err;
+    }
+
+    string? responseId = response.id;
+    if responseId is string {
+        span.addResponseId(responseId);
+    }
+    int? inputTokens = response.usage?.promptTokens;
+    if inputTokens is int {
+        span.addInputTokenCount(inputTokens);
+    }
+    int? outputTokens = response.usage?.completionTokens;
+    if outputTokens is int {
+        span.addOutputTokenCount(outputTokens);
     }
 
     mistral:ChatCompletionChoice[]? choices = response.choices;
     if choices is () || choices.length() == 0 {
-        return error ai:LlmInvalidResponseError("Empty response from the model when using function call API");
+        ai:Error err = error ai:LlmInvalidResponseError("Empty response from the model when using function call API");
+        span.close(err);
+        return err;
     }
-    mistral:AssistantMessage message = choices[0].message;
 
+    mistral:AssistantMessage message = choices[0].message;
     mistral:ToolCall[]? toolCalls = message?.toolCalls;
 
     if toolCalls == () || toolCalls.length() == 0 {
-        return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
+        ai:Error err = error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
+        span.close(err);
+        return err;
     }
 
     mistral:ToolCall tool = toolCalls[0];
     string|record {} toolArguments = tool.'function.arguments;
-
     if toolArguments == "" || toolArguments == {} {
-        return error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
+        ai:Error err = error(NO_RELEVANT_RESPONSE_FROM_THE_LLM);
+        span.close(err);
+        return err;
     }
 
     do {
@@ -274,20 +308,29 @@ isolated function generateLlmResponse(mistral:Client llmClient, int maxTokens, M
         map<json>? arguments = check jsonArgs.cloneWithType();
 
         anydata|error res = parseResponseAsType(arguments.toJsonString(), expectedResponseTypedesc,
-                ResponseSchema.isOriginallyJsonObject);
+                responseSchema.isOriginallyJsonObject);
         if res is error {
-            return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
+            ai:Error err = error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
                 expectedResponseTypedesc.toBalString()}', found '${res.toBalString()}'`);
+            span.close(err);
+            return err;
         }
 
         anydata|error result = res.ensureType(expectedResponseTypedesc);
         if result is error {
-            return error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
+            ai:Error err = error ai:LlmInvalidGenerationError(string `Invalid value returned from the LLM Client, expected: '${
                 expectedResponseTypedesc.toBalString()}', found '${(typeof response).toBalString()}'`);
+            span.close(err);
+            return err;
         }
 
+        span.addOutputMessages(result.toJson());
+        span.addOutputType(observe:JSON);
+        span.close();
         return result;
     } on fail error e {
-        return error("Invalid or malformed arguments received in function call response.", e);
+        ai:Error err = error("Invalid or malformed arguments received in function call response.", e);
+        span.close(err);
+        return err;
     }
 }

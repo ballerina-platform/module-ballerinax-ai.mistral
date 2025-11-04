@@ -15,6 +15,7 @@
 // under the License.
 
 import ballerina/ai;
+import ballerina/ai.observe;
 import ballerina/jballerina.java;
 import ballerina/lang.regexp;
 import ballerina/uuid;
@@ -86,6 +87,17 @@ public isolated client class ModelProvider {
     # + return - Returns an array of ai:ChatAssistantMessage or an ai:LlmError in case of failures
     isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
         returns ai:ChatAssistantMessage|ai:Error {
+        observe:ChatSpan span = observe:createChatSpan(self.modelType);
+        span.addProvider("mistral_ai");
+        if stop is string {
+            span.addStopSequence(stop);
+        }
+        span.addTemperature(self.temperature);
+        json|ai:Error inputMessage = convertMessageToJson(messages);
+        if inputMessage is json {
+            span.addInputMessages(inputMessage);
+        }
+
         MistralMessages[] mistralMessages = check self.mapToMistralMessageRecords(messages);
         mistral:ChatCompletionRequest request = {
             model: self.modelType,
@@ -96,6 +108,7 @@ public isolated client class ModelProvider {
         };
 
         if tools.length() > 0 {
+            span.addTools(tools);
             mistral:Function[] mistralFunctions = [];
             foreach ai:ChatCompletionFunctions toolFunction in tools {
                 mistral:Function mistralFunction = {
@@ -117,18 +130,48 @@ public isolated client class ModelProvider {
 
         mistral:ChatCompletionResponse|error response = self.llmClient->/chat/completions.post(request);
         if response is error {
-            return error ai:LlmConnectionError("Error while connecting to the model", response);
+            ai:Error err = error ai:LlmConnectionError("Error while connecting to the model", response);
+            span.close(err);
+            return err;
         }
-        return self.getAssistantMessage(response);
+
+        string? responseId = response.id;
+        if responseId is string {
+            span.addResponseId(responseId);
+        }
+        int? inputTokens = response.usage?.promptTokens;
+        if inputTokens is int {
+            span.addInputTokenCount(inputTokens);
+        }
+        int? outputTokens = response.usage?.completionTokens;
+        if outputTokens is int {
+            span.addOutputTokenCount(outputTokens);
+        }
+
+        mistral:ChatCompletionChoice[]? choices = response.choices;
+        string? finishReason = (choices !is () && choices.length() > 0) ? choices[0].finishReason : ();
+        if finishReason is string {
+            span.addFinishReason(finishReason);
+        }
+        ai:ChatAssistantMessage|ai:Error result = self.getAssistantMessage(response);
+        if result is ai:Error {
+            span.close(result);
+            return result;
+        }
+
+        span.addOutputMessages(result);
+        span.addOutputType(observe:TEXT);
+        span.close();
+        return result;
     }
 
     # Sends a chat request to the model and generates a value that belongs to the type
     # corresponding to the type descriptor argument.
-    # 
+    #
     # + prompt - The prompt to use in the chat messages
     # + td - Type descriptor specifying the expected return type format
     # + return - Generates a value that belongs to the type, or an error if generation fails
-    isolated remote function generate(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>) 
+    isolated remote function generate(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
                 returns td|ai:Error = @java:Method {
         'class: "io.ballerina.lib.ai.mistral.Generator"
     } external;
@@ -288,4 +331,15 @@ isolated function getChatMessageStringContent(ai:Prompt|string prompt) returns s
         promptStr += insertion.toString() + str;
     }
     return promptStr.trim();
+}
+
+isolated function convertMessageToJson(ai:ChatMessage[]|ai:ChatMessage messages) returns json|ai:Error {
+    if messages is ai:ChatMessage[] {
+        return messages.'map(msg => msg is ai:ChatUserMessage|ai:ChatSystemMessage ? check convertMessageToJson(msg) : msg);
+    }
+    if messages is ai:ChatUserMessage|ai:ChatSystemMessage {
+
+    }
+    return messages !is ai:ChatUserMessage|ai:ChatSystemMessage ? messages :
+        {role: messages.role, content: check getChatMessageStringContent(messages.content), name: messages.name};
 }
