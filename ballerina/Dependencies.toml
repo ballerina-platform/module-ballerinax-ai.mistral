@@ -75,7 +75,7 @@ modules = [
 [[package]]
 org = "ballerina"
 name = "crypto"
-version = "2.9.2"
+version = "2.9.3"
 dependencies = [
 	{org = "ballerina", name = "jballerina.java"},
 	{org = "ballerina", name = "time"}
@@ -428,7 +428,7 @@ modules = [
 [[package]]
 org = "ballerinax"
 name = "mistral"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
 	{org = "ballerina", name = "constraint"},
 	{org = "ballerina", name = "data.jsondata"},
