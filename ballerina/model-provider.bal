@@ -86,19 +86,19 @@ public isolated client class ModelProvider {
     # + stop - Stop sequence to stop the completion
     # + return - Returns an array of ai:ChatAssistantMessage or an ai:LlmError in case of failures
     isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages,
-            (ai:ChatCompletionFunctions|ai:InbuiltModelTool)[] tools = [], string? stop = ())
+            (ai:ChatCompletionFunctions|ai:BuiltInTool)[] tools = [], string? stop = ())
         returns ai:ChatAssistantMessage|ai:Error {
         string[] unsupportedTools = [];
         ai:ChatCompletionFunctions[] functionTools = [];
         foreach var tool in tools {
-            if tool is ai:InbuiltModelTool {
+            if tool is ai:BuiltInTool {
                 unsupportedTools.push(tool.name);
             } else {
                 functionTools.push(tool);
             }
         }
         if unsupportedTools.length() > 0 {
-            return error ai:Error(string `Inbuilt tools [${string:'join(", ", ...unsupportedTools)}] are not supported.`);
+            return error ai:Error(string `Built-in tools [${string:'join(", ", ...unsupportedTools)}] are not supported.`);
         }
 
         observe:ChatSpan span = observe:createChatSpan(self.modelType);
