@@ -7,7 +7,7 @@ icon="icon.png"
 name = "ai.mistral"
 org = "ballerinax"
 repository = "https://github.com/ballerina-platform/module-ballerinax-ai.mistral"
-version = "1.2.2"
+version = "1.3.0"
 
 [platform.java21]
 graalvmCompatible = true
@@ -15,13 +15,13 @@ graalvmCompatible = true
 [[platform.java21.dependency]]
 groupId = "io.ballerina.lib"
 artifactId = "ai.mistral-native"
-version = "1.2.2"
-path = "../native/build/libs/ai.mistral-native-1.2.2-SNAPSHOT.jar"
+version = "1.3.0"
+path = "../native/build/libs/ai.mistral-native-1.3.0-SNAPSHOT.jar"
 
 [[dependency]]
 org="ballerina"
 name="ai"
-version="1.10.0"
+version="1.11.0"
 repository="local"
 
 [[dependency]]
