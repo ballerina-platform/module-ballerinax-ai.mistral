@@ -367,3 +367,16 @@ function testGenerateMethodWithArrayUnionRecord2() returns ai:Error? {
    Cricketers7[]|Cricketers8|error result = mistralProvider->generate(`Name a random world class cricketer`);
     test:assertTrue(result is Cricketers8);
 }
+
+// ===== Built-in tool tests =====
+
+@test:Config
+function testChatWithBuiltInToolError() returns error? {
+    ai:ChatUserMessage userMsg = {role: "user", content: "Search the web for latest news"};
+    ai:BuiltInTool webSearchTool = {name: "web_search"};
+    ai:ChatAssistantMessage|ai:Error result = mistralProvider->chat(userMsg, [webSearchTool]);
+    test:assertTrue(result is ai:Error);
+    string errorMsg = (<ai:Error>result).message();
+    test:assertTrue(errorMsg.includes("Built-in tools [web_search] are not supported."),
+            string `expected built-in tool error, found: ${errorMsg}`);
+}
