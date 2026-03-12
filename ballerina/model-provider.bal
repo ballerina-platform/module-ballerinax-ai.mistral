@@ -85,8 +85,22 @@ public isolated client class ModelProvider {
     # + tools - Tool definitions to be used for the tool call
     # + stop - Stop sequence to stop the completion
     # + return - Returns an array of ai:ChatAssistantMessage or an ai:LlmError in case of failures
-    isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
+    isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages,
+            (ai:ChatCompletionFunctions|ai:BuiltInTool)[] tools = [], string? stop = ())
         returns ai:ChatAssistantMessage|ai:Error {
+        string[] unsupportedTools = [];
+        ai:ChatCompletionFunctions[] functionTools = [];
+        foreach var tool in tools {
+            if tool is ai:BuiltInTool {
+                unsupportedTools.push(tool.name);
+            } else {
+                functionTools.push(tool);
+            }
+        }
+        if unsupportedTools.length() > 0 {
+            return error ai:Error(string `Built-in tools [${string:'join(", ", ...unsupportedTools)}] are not supported.`);
+        }
+
         observe:ChatSpan span = observe:createChatSpan(self.modelType);
         span.addProvider("mistral_ai");
         if stop is string {
@@ -107,10 +121,10 @@ public isolated client class ModelProvider {
             maxTokens: self.maxTokens
         };
 
-        if tools.length() > 0 {
-            span.addTools(tools);
+        if functionTools.length() > 0 {
+            span.addTools(functionTools);
             mistral:Function[] mistralFunctions = [];
-            foreach ai:ChatCompletionFunctions toolFunction in tools {
+            foreach ai:ChatCompletionFunctions toolFunction in functionTools {
                 mistral:Function mistralFunction = {
                     name: toolFunction.name,
                     description: toolFunction.description,
