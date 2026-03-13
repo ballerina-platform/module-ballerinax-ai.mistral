@@ -1,6 +1,15 @@
 ## Overview
 
-This module offers APIs for connecting with MistralAI Large Language Models (LLM).
+Mistral AI provides high-performance, open-weights large language models (LLMs) designed for efficiency and versatility. The Mistral connector enables integration with Mistral AI's models, allowing you to build advanced natural language processing applications.
+
+### Key Features
+
+- Seamless integration with high-performance Mistral LLMs
+- Support for chat completions and text generation
+- Efficient handling of model parameters and prompts
+- Simplified access to Mistral AI's API endpoints
+- Secure communication with API key authentication
+- GraalVM compatible for native image builds
 
 ## Prerequisites
 
