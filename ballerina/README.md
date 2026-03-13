@@ -4,11 +4,12 @@ Mistral AI provides high-performance, open-weights large language models (LLMs) 
 
 ### Key Features
 
-- Seamless integration with high-performance Mistral LLMs\n- Support for chat completions and text generation\n- Efficient handling of model parameters and prompts\n- Simplified access to Mistral AI's API endpoints\n- Secure communication with API key authentication\n- GraalVM compatible for native image builds
-
-
-
-This module offers APIs for connecting with MistralAI Large Language Models (LLM).
+- Seamless integration with high-performance Mistral LLMs
+- Support for chat completions and text generation
+- Efficient handling of model parameters and prompts
+- Simplified access to Mistral AI's API endpoints
+- Secure communication with API key authentication
+- GraalVM compatible for native image builds
 
 ## Prerequisites
 
