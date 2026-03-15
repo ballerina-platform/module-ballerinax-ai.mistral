@@ -380,3 +380,15 @@ function testChatWithBuiltInToolError() returns error? {
     test:assertTrue(errorMsg.includes("Built-in tools [web_search] are not supported."),
             string `expected built-in tool error, found: ${errorMsg}`);
 }
+
+@test:Config
+function testChatWithMixedToolsError() returns error? {
+    ai:ChatUserMessage userMsg = {role: "user", content: "Search the web for latest news"};
+    ai:BuiltInTool webSearchTool = {name: "web_search"};
+    ai:ChatCompletionFunctions functionTool = {name: "get_weather", description: "Get weather", parameters: {}};
+    ai:ChatAssistantMessage|ai:Error result = mistralProvider->chat(userMsg, [functionTool, webSearchTool]);
+    test:assertTrue(result is ai:Error);
+    string errorMsg = (<ai:Error>result).message();
+    test:assertTrue(errorMsg.includes("Built-in tools [web_search] are not supported."),
+            string `expected built-in tool error, found: ${errorMsg}`);
+}
