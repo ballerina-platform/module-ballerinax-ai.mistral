@@ -80,25 +80,17 @@ function testGenerateMethodWithTextDocumentArray() returns error? {
 }
 
 @test:Config
-function testGenerateMethodWithTextChunk() returns ai:Error? {
-    ai:TextChunk chunk = {
-        content: string `Title: ${blog1.title} Content: ${blog1.content}`
-    };
-    int maxScore = 10;
-
-    int|error rating = mistralProvider->generate(`How would you rate this text chunk content out of ${maxScore}. ${chunk}.`);
-    test:assertEquals(rating, 4);
-}
-
-@test:Config
-function testGenerateMethodWithTextChunkArray() returns error? {
+function testGenerateMethodWithTextChunk() returns error? {
     ai:TextChunk chunk = {
         content: string `Title: ${blog1.title} Content: ${blog1.content}`
     };
     ai:TextChunk[] chunks = [chunk, chunk];
     int maxScore = 10;
-    Review r = check reviewStr.fromJsonStringWithType(Review);
 
+    int|error rating = mistralProvider->generate(`How would you rate this text chunk content out of ${maxScore}. ${chunk}.`);
+    test:assertEquals(rating, 4);
+
+    Review r = check reviewStr.fromJsonStringWithType(Review);
     ReviewArray|error result = mistralProvider->generate(`How would you rate these text chunks out of ${maxScore}. ${chunks}. Thank you!`);
     test:assertEquals(result, [r, r]);
 }
