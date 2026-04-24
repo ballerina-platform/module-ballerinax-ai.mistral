@@ -87,11 +87,11 @@ function testGenerateMethodWithTextChunk() returns error? {
     ai:TextChunk[] chunks = [chunk, chunk];
     int maxScore = 10;
 
-    int|error rating = mistralProvider->generate(`How would you rate this text chunk content out of ${maxScore}. ${chunk}.`);
+    int rating = check mistralProvider->generate(`How would you rate this text chunk content out of ${maxScore}. ${chunk}.`);
     test:assertEquals(rating, 4);
 
     Review r = check reviewStr.fromJsonStringWithType(Review);
-    ReviewArray|error result = mistralProvider->generate(`How would you rate these text chunks out of ${maxScore}. ${chunks}. Thank you!`);
+    ReviewArray result = check mistralProvider->generate(`How would you rate these text chunks out of ${maxScore}. ${chunks}. Thank you!`);
     test:assertEquals(result, [r, r]);
 }
 
