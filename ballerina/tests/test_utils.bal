@@ -49,6 +49,14 @@ isolated function getExpectedParameterSchema(string message) returns map<json> {
         return expectedParameterSchemaStringForRateBlog2;
     }
 
+    if message.startsWith("How would you rate these text chunks") {
+        return expectedParameterSchemaStringForRateBlog5;
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return expectedParameterSchemaStringForRateBlog;
+    }
+
     if message.startsWith("How would you rate this") {
         return expectedParameterSchemaStringForRateBlog;
     }
@@ -201,6 +209,14 @@ isolated function getTheMockLLMResult(string message) returns map<json> {
         return review;
     }
 
+    if message.startsWith("How would you rate these text chunks") {
+        return {"result": [review, review]};
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return {result: 4};
+    }
+
     if message.startsWith("How would you rate this") {
         return {result: 4};
     }
@@ -321,6 +337,14 @@ isolated function getExpectedContentParts(string message) returns (map<anydata>)
 
     if message.startsWith("How would you rate this text blog") {
         return expectedContentPartsForRateBlog8;
+    }
+
+    if message.startsWith("How would you rate these text chunks") {
+        return expectedContentPartsForTextChunkArray;
+    }
+
+    if message.startsWith("How would you rate this text chunk") {
+        return expectedContentPartsForTextChunk;
     }
 
     if message.startsWith("How would you rate this") {
