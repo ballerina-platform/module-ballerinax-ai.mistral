@@ -22,7 +22,7 @@ import ballerina/uuid;
 import ballerinax/mistral;
 
 const DEFAULT_MISTRAL_AI_SERVICE_URL = "https://api.mistral.ai/v1";
-const DEFAULT_MAX_TOKEN_COUNT = 512;
+const DEFAULT_MAX_TOKEN_COUNT = 4096;
 const DEFAULT_TEMPERATURE = 0.7d;
 
 # MistralAiProvider is a client class that provides an interface for interacting with Mistral AI Large Language Models.
