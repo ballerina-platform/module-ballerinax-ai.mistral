@@ -1,6 +1,6 @@
 ## Overview
 
-Mistral AI provides high-performance, open-weights large language models (LLMs) designed for efficiency and versatility. The Mistral connector enables integration with Mistral AI's models, allowing you to build advanced natural language processing applications.
+The `ai.mistral` module provides a Mistral AI-backed `ModelProvider` implementation for the [`ballerina/ai`](https://central.ballerina.io/ballerina/ai/latest) agent framework. Use it to drive Mistral's open-weights chat models from Ballerina AI agents and other `ai`-module abstractions, rather than calling the Mistral REST API directly.
 
 ### Key Features
 
