@@ -9,6 +9,14 @@ org = "ballerinax"
 repository = "https://github.com/ballerina-platform/module-ballerinax-ai.mistral"
 version = "@toml.version@"
 
+# TODO: Temporary local dependency on the `ballerina/ai` build that carries the
+# streaming contract. Replace with a published release before merging.
+[[dependency]]
+org = "ballerina"
+name = "ai"
+version = "1.11.3"
+repository = "local"
+
 [platform.java21]
 graalvmCompatible = true
 

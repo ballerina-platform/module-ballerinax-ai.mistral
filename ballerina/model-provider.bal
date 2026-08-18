@@ -16,6 +16,8 @@
 
 import ballerina/ai;
 import ballerina/ai.observe;
+import ballerina/data.jsondata;
+import ballerina/http;
 import ballerina/jballerina.java;
 import ballerina/lang.regexp;
 import ballerina/uuid;
@@ -32,6 +34,9 @@ const DEFAULT_TEMPERATURE = 0.7d;
 public isolated client class ModelProvider {
     *ai:ModelProvider;
     private final mistral:Client llmClient;
+    // Raw HTTP client used for the streaming endpoint; the generated `mistral:Client`
+    // binds responses to a single value and cannot consume Server-Sent Events.
+    private final http:Client streamClient;
     private final string modelType;
     private final decimal temperature;
     private final int maxTokens;
@@ -76,7 +81,17 @@ public isolated client class ModelProvider {
             return error ai:Error("Failed to initialize MistralAiProvider", llmClient);
         }
 
+        http:Client|error streamClient = new (serviceUrl, {
+            auth: {token: apiKey},
+            httpVersion: connectionConfig.httpVersion,
+            timeout: connectionConfig.timeout
+        });
+        if streamClient is error {
+            return error ai:Error("Failed to initialize the Mistral AI streaming client", streamClient);
+        }
+
         self.llmClient = llmClient;
+        self.streamClient = streamClient;
         self.modelType = modelType;
         self.temperature = temperature;
         self.maxTokens = maxTokens;
@@ -177,6 +192,74 @@ public isolated client class ModelProvider {
     isolated remote function generate(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
                 returns td|ai:Error = @java:Method {
         'class: "io.ballerina.lib.ai.mistral.Generator"
+    } external;
+
+    # Sends a streaming chat request to the Mistral AI model with the given messages and tools.
+    #
+    # + messages - List of chat messages or a single user message
+    # + tools - Tool definitions to be used for the tool call
+    # + stop - Stop sequence to stop the completion
+    # + return - A stream of chat completion chunks, or an error in case of failures
+    remote function chatStream(ai:ChatMessage[]|ai:ChatUserMessage messages,
+            ai:ChatCompletionFunctions[] tools = [], string? stop = ())
+            returns stream<ai:ChatCompletionChunk, ai:Error?>|ai:Error {
+        mistral:ChatCompletionRequest request = {
+            model: self.modelType,
+            stop,
+            messages: check self.mapToMistralMessageRecords(messages),
+            temperature: self.temperature,
+            maxTokens: self.maxTokens,
+            'stream: true
+        };
+
+        if tools.length() > 0 {
+            mistral:Tool[] mistralTools = [];
+            foreach ai:ChatCompletionFunctions tool in tools {
+                mistralTools.push({
+                    'function: {
+                        name: tool.name,
+                        description: tool.description,
+                        strict: false,
+                        parameters: tool.parameters ?: {}
+                    }
+                });
+            }
+            request.tools = mistralTools;
+        }
+
+        // `jsondata:toJson` is required here: the `mistral` records carry
+        // `@jsondata:Name` annotations, so a plain `toJson()` would emit the
+        // Ballerina field names (`maxTokens`, `toolCalls`) instead of the wire ones.
+        http:Response|error response = self.streamClient->post("/chat/completions", jsondata:toJson(request));
+        if response is error {
+            return error ai:LlmConnectionError("Error while connecting to the model for streaming", response);
+        }
+        if response.statusCode != http:STATUS_OK {
+            // A non-2xx response (e.g. rate limiting, invalid model) is returned as a
+            // plain JSON error body, not an SSE stream. Surface it instead of failing
+            // with a misleading "not text/event-stream" error from getSseEventStream().
+            json|error errorPayload = response.getJsonPayload();
+            string detail = errorPayload is json ? errorPayload.toJsonString() : response.statusCode.toString();
+            return error ai:LlmConnectionError(
+                string `Model returned an error while streaming (HTTP ${response.statusCode}): ${detail}`);
+        }
+        stream<http:SseEvent, error?>|error sseStream = response.getSseEventStream();
+        if sseStream is error {
+            return error ai:Error("Failed to open the SSE stream from the model", sseStream);
+        }
+        stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = new (new MistralChunkIterator(sseStream));
+        return chunkStream;
+    }
+
+    # Sends a streaming chat request to the model using the given prompt and streams
+    # back the generated answer. Only `string` is supported as the expected type.
+    #
+    # + prompt - The prompt to use in the chat request
+    # + td - The expected type of the streamed value; must be `string`
+    # + return - A stream of the generated value, or an error if the type is unsupported
+    remote function generateStream(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
+            returns stream<td, ai:Error?>|ai:Error = @java:Method {
+        'class: "io.ballerina.lib.ai.mistral.StreamGenerator"
     } external;
 
     # Generates a random tool ID.
@@ -345,4 +428,108 @@ isolated function convertMessageToJson(ai:ChatMessage[]|ai:ChatMessage messages)
     }
     return messages !is ai:ChatUserMessage|ai:ChatSystemMessage ? messages :
         {role: messages.role, content: check getChatMessageStringContent(messages.content), name: messages.name};
+}
+
+# Iterator that converts Mistral AI's Server-Sent Event stream into a stream of
+# normalized `ai:ChatCompletionChunk` values. Each `data:` payload is parsed into
+# the Mistral wire chunk and mapped via `toAiChunk`; the terminating `[DONE]`
+# sentinel, blank lines, and unparseable keep-alive comments are skipped.
+class MistralChunkIterator {
+    private stream<http:SseEvent, error?> sseStream;
+
+    isolated function init(stream<http:SseEvent, error?> sseStream) {
+        self.sseStream = sseStream;
+    }
+
+    public isolated function next() returns record {|ai:ChatCompletionChunk value;|}|ai:Error? {
+        while true {
+            record {|http:SseEvent value;|}|error? event = self.sseStream.next();
+            if event is () {
+                return ();
+            }
+            if event is error {
+                return error ai:Error("Error while reading the model stream", event);
+            }
+            string? data = event.value.data;
+            if data is () {
+                continue;
+            }
+            string trimmedData = data.trim();
+            if trimmedData == "" {
+                continue;
+            }
+            if trimmedData == "[DONE]" {
+                return ();
+            }
+            CompletionChunk|error wireChunk = trimmedData.fromJsonStringWithType();
+            if wireChunk is error {
+                continue;
+            }
+            return {value: toAiChunk(wireChunk)};
+        }
+    }
+
+    public isolated function close() returns ai:Error? {
+        error? result = self.sseStream.close();
+        if result is error {
+            return error ai:Error("Error while closing the model stream", result);
+        }
+        return ();
+    }
+}
+
+# Builds the string stream behind the dependently-typed `generateStream`. The
+# native `StreamGenerator` shim trampolines here so the type gating stays in
+# Ballerina. Only `string` is supported; other types yield an error because a
+# partial generation is a valid value only for `string`. When valid, the
+# underlying `chatStream` chunks are projected onto their text fragments.
+#
+# + llmModel - The model provider whose `chatStream` supplies the chunks
+# + prompt - The prompt to send to the model
+# + td - The caller's expected type; must be `string`
+# + return - A stream of text fragments, or an error if the type is unsupported
+function generateLlmResponseStream(ModelProvider llmModel, ai:Prompt prompt, typedesc<anydata> td)
+        returns stream<string, ai:Error?>|ai:Error {
+    if td !is typedesc<string> {
+        return error ai:Error("This data type is not supported for streaming. " +
+            "'generateStream' supports only 'string'; use 'generate' for structured types.");
+    }
+    stream<ai:ChatCompletionChunk, ai:Error?> chunks = check llmModel->chatStream({role: ai:USER, content: prompt});
+    stream<string, ai:Error?> textStream = new (new ChunkTextIterator(chunks));
+    return textStream;
+}
+
+# Projects a normalized `ai:ChatCompletionChunk` stream onto its text content,
+# yielding each non-empty `delta.content` fragment and skipping tool-call and
+# usage-only chunks. Backs `generateLlmResponseStream`.
+class ChunkTextIterator {
+    private stream<ai:ChatCompletionChunk, ai:Error?> chunks;
+
+    isolated function init(stream<ai:ChatCompletionChunk, ai:Error?> chunks) {
+        self.chunks = chunks;
+    }
+
+    public isolated function next() returns record {|string value;|}|ai:Error? {
+        while true {
+            record {|ai:ChatCompletionChunk value;|}|ai:Error? next = self.chunks.next();
+            if next is () {
+                return ();
+            }
+            if next is ai:Error {
+                return next;
+            }
+            ai:ChatCompletionChunkChoice[] choices = next.value.choices;
+            if choices.length() == 0 {
+                continue;
+            }
+            string? content = choices[0].delta.content;
+            if content is string && content.length() > 0 {
+                return {value: content};
+            }
+        }
+    }
+
+    public isolated function close() returns ai:Error? {
+        return self.chunks.close();
+    }
 }
