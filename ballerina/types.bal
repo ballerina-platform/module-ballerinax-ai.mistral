@@ -236,85 +236,67 @@ type UsageInfo record {
 
 // ── Wire → normalized mapping ──────────────────────────────────────────────
 // Projects a Mistral `CompletionChunk` (the wire types above) onto the normalized
-// `ai:ChatCompletionChunk` that `chatStream` must return. Only the subset the `ai`
-// type can hold is mapped; everything else is ignored.
+// `ai:ChatMessageChunk` that `chatAsStream` must return. Only the subset the `ai`
+// type can hold is mapped; everything else is ignored. Token usage is not part of
+// `ai:ChatMessageChunk` and is reported to the observability span directly from the
+// wire chunk instead; see `MistralChunkIterator.recordObservations`.
 
-# Maps a Mistral wire chunk onto the normalized `ai:ChatCompletionChunk`.
+# Maps a Mistral wire chunk onto the normalized `ai:ChatMessageChunk`.
 # Forwards tool calls on every chunk (not just the first), so argument fragments
 # stream through correctly.
 #
 # + wireChunk - The parsed Mistral wire chunk
-# + return - The normalized chunk consumed by the `ai` module
-isolated function toAiChunk(CompletionChunk wireChunk) returns ai:ChatCompletionChunk {
-    ai:ChatCompletionChunkChoice[] choices = [];
-    foreach CompletionResponseStreamChoice choice in wireChunk.choices {
-        DeltaMessage wireDelta = choice.delta;
-        string|DeltaContentChunk[]? wireContent = wireDelta?.content;
-        ai:ChatCompletionChunkDelta delta = {
-            content: toContentString(wireContent),
-            reasoning: toReasoningString(wireContent)
-        };
-        ai:ROLE? role = mapRole(wireDelta?.role);
-        if role is ai:ROLE {
-            delta.role = role;
-        }
-        DeltaToolCall[]? wireToolCalls = wireDelta?.tool_calls;
-        if wireToolCalls is DeltaToolCall[] {
-            ai:ToolCallChunk[] toolCalls = [];
-            // Mistral omits `index` on single tool calls; fall back to the position
-            // in the array so fragments of the same call still correlate.
-            foreach int i in 0 ..< wireToolCalls.length() {
-                DeltaToolCall wireToolCall = wireToolCalls[i];
-                ai:ToolCallChunk toolCall = {index: wireToolCall?.index ?: i};
-                string? id = wireToolCall?.id;
-                if id is string {
-                    toolCall.id = id;
-                }
-                DeltaFunctionCall? fn = wireToolCall?.'function;
-                if fn is DeltaFunctionCall {
-                    ai:FunctionCallChunk functionFragment = {};
-                    string? name = fn?.name;
-                    if name is string {
-                        functionFragment.name = name;
-                    }
-                    string? arguments = fn?.arguments;
-                    if arguments is string {
-                        functionFragment.arguments = arguments;
-                    }
-                    toolCall.'function = functionFragment;
-                }
-                toolCalls.push(toolCall);
+# + return - The normalized chunk consumed by the `ai` module, or `()` when the
+# chunk carries nothing for the caller (no choices, or a delta with no content,
+# reasoning, tool calls or finish reason)
+isolated function toAiChunk(CompletionChunk wireChunk) returns ai:ChatMessageChunk? {
+    CompletionResponseStreamChoice[] choices = wireChunk.choices;
+    if choices.length() == 0 {
+        return ();
+    }
+    DeltaMessage wireDelta = choices[0].delta;
+    string|DeltaContentChunk[]? wireContent = wireDelta?.content;
+    string? content = toContentString(wireContent);
+    string? reasoning = toReasoningString(wireContent);
+
+    ai:ToolCallChunk[]? toolCalls = ();
+    DeltaToolCall[]? wireToolCalls = wireDelta?.tool_calls;
+    if wireToolCalls is DeltaToolCall[] {
+        ai:ToolCallChunk[] calls = [];
+        // Mistral omits `index` on single tool calls; fall back to the position
+        // in the array so fragments of the same call still correlate.
+        foreach int i in 0 ..< wireToolCalls.length() {
+            DeltaToolCall wireToolCall = wireToolCalls[i];
+            ai:ToolCallChunk toolCall = {index: wireToolCall?.index ?: i};
+            string? id = wireToolCall?.id;
+            if id is string {
+                toolCall.id = id;
             }
-            delta.toolCalls = toolCalls;
+            DeltaFunctionCall? fn = wireToolCall?.'function;
+            if fn is DeltaFunctionCall {
+                string? name = fn?.name;
+                if name is string {
+                    toolCall.name = name;
+                }
+                string? arguments = fn?.arguments;
+                if arguments is string {
+                    toolCall.arguments = arguments;
+                }
+            }
+            calls.push(toolCall);
         }
-        choices.push({index: choice.index, delta, finishReason: mapFinishReason(choice.finish_reason)});
+        toolCalls = calls;
     }
 
-    ai:ChatCompletionChunk chunk = {choices};
+    ai:FinishReason? finishReason = mapFinishReason(choices[0].finish_reason);
+    if content is () && reasoning is () && toolCalls is () && finishReason is () {
+        return ();
+    }
+
+    ai:ChatMessageChunk chunk = {role: ai:ASSISTANT, content, reasoning, toolCalls, finishReason};
     string? id = wireChunk?.id;
     if id is string {
         chunk.id = id;
-    }
-    string? model = wireChunk?.model;
-    if model is string {
-        chunk.model = model;
-    }
-    UsageInfo? usage = wireChunk?.usage;
-    if usage is UsageInfo {
-        ai:CompletionTokenUsage tokenUsage = {};
-        int? promptTokens = usage?.prompt_tokens;
-        if promptTokens is int {
-            tokenUsage.promptTokens = promptTokens;
-        }
-        int? completionTokens = usage?.completion_tokens;
-        if completionTokens is int {
-            tokenUsage.completionTokens = completionTokens;
-        }
-        int? totalTokens = usage?.total_tokens;
-        if totalTokens is int {
-            tokenUsage.totalTokens = totalTokens;
-        }
-        chunk.usage = tokenUsage;
     }
     return chunk;
 }
@@ -349,7 +331,7 @@ isolated function toContentString(string|DeltaContentChunk[]? content) returns s
 #
 # Reasoning models such as `magistral-*` stream their thinking as `thinking`
 # fragments whose own `thinking` field holds nested `text` fragments. The
-# normalized `ai:ChatCompletionChunkDelta.reasoning` field carries these
+# normalized `ai:ChatMessageChunk.reasoning` field carries these
 # separately from the answer text.
 #
 # + content - The `content` of a streamed delta
@@ -379,33 +361,10 @@ isolated function toReasoningString(string|DeltaContentChunk[]? content) returns
     return found ? reasoning : ();
 }
 
-# Safely maps a Mistral role string onto the `ai:ROLE` enum; returns `()` for
-# absent or unrecognized values rather than panicking on a cast.
-#
-# + role - The role string from the wire delta
-# + return - The mapped `ai:ROLE`, or `()` when absent/unrecognized
-isolated function mapRole(string? role) returns ai:ROLE? {
-    // Streamed response deltas only carry the "assistant" role; "system"/"user"
-    // are handled for completeness. ("function" is request-only and the `ai`
-    // enum member is not accessible here, so it is intentionally omitted.)
-    match role {
-        "system" => {
-            return ai:SYSTEM;
-        }
-        "user" => {
-            return ai:USER;
-        }
-        "assistant" => {
-            return ai:ASSISTANT;
-        }
-    }
-    return ();
-}
-
 # Reports whether a wire finish reason means the generation was aborted by the
 # model. Mistral's `error` reason has no normalized equivalent - it means the
 # response is incomplete, which the caller must not mistake for a clean end of
-# stream, so `chatStream` fails the stream on it instead of mapping it.
+# stream, so `chatAsStream` fails the stream on it instead of mapping it.
 #
 # + finishReason - The finish reason from the wire chunk
 # + return - Whether the generation was aborted

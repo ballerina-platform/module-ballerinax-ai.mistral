@@ -24,10 +24,10 @@ isolated function streamProvider(string path) returns ModelProvider|ai:Error =>
 
 # Collects a chunk stream into a list, so assertions can be made over the whole
 # sequence rather than one chunk at a time.
-isolated function collect(stream<ai:ChatCompletionChunk, ai:Error?> chunks)
-        returns ai:ChatCompletionChunk[]|ai:Error {
-    ai:ChatCompletionChunk[] collected = [];
-    ai:Error? err = from ai:ChatCompletionChunk chunk in chunks
+isolated function collect(stream<ai:ChatMessageChunk, ai:Error?> chunks)
+        returns ai:ChatMessageChunk[]|ai:Error {
+    ai:ChatMessageChunk[] collected = [];
+    ai:Error? err = from ai:ChatMessageChunk chunk in chunks
         do {
             collected.push(chunk);
         };
@@ -37,80 +37,99 @@ isolated function collect(stream<ai:ChatCompletionChunk, ai:Error?> chunks)
     return collected;
 }
 
+# Returns the finish reason of the last chunk that carries one.
+isolated function finalFinishReason(ai:ChatMessageChunk[] chunks) returns ai:FinishReason? {
+    ai:FinishReason? finishReason = ();
+    foreach ai:ChatMessageChunk chunk in chunks {
+        ai:FinishReason? reason = chunk.finishReason;
+        if reason is ai:FinishReason {
+            finishReason = reason;
+        }
+    }
+    return finishReason;
+}
+
 @test:Config
 function testChatStreamDeliversEveryChunk() returns ai:Error? {
     ModelProvider provider = check streamProvider("text");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[] chunks = check collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
 
     test:assertEquals(chunks.length(), 3, "the terminal chunk must not be dropped");
-    test:assertEquals(chunks[0].choices[0].delta.role, ai:ASSISTANT);
-    test:assertEquals(chunks[0].choices[0].delta.content, "Hel");
-    test:assertEquals(chunks[1].choices[0].delta.content, "lo");
-    test:assertEquals(chunks[2].choices[0].finishReason, ai:STOP);
-    test:assertEquals(chunks[2].usage, <ai:CompletionTokenUsage>{
-        promptTokens: 7,
-        completionTokens: 3,
-        totalTokens: 10
-    });
+    test:assertEquals(chunks[0].content, "Hel");
+    test:assertEquals(chunks[1].content, "lo");
+    test:assertEquals(chunks[2].content, "!");
+    test:assertEquals(chunks[2].finishReason, ai:STOP);
+}
+
+@test:Config
+function testChatStreamSetsRoleOnEveryChunk() returns ai:Error? {
+    ModelProvider provider = check streamProvider("text");
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
+
+    test:assertTrue(chunks.length() > 0, "expected at least one chunk");
+    foreach ai:ChatMessageChunk chunk in chunks {
+        test:assertEquals(chunk.role, ai:ASSISTANT, "expected 'role' to be set on every chunk");
+    }
 }
 
 @test:Config
 function testChatStreamWithUnknownFinishReason() returns ai:Error? {
     ModelProvider provider = check streamProvider("unknownfinish");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[] chunks = check collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
 
-    // An unrecognized reason must degrade to `()`, not drop the chunk and its usage.
+    // An unrecognized reason must degrade to `()`, not drop the chunk.
     test:assertEquals(chunks.length(), 1);
-    test:assertEquals(chunks[0].choices[0].finishReason, ());
-    test:assertEquals(chunks[0].usage?.totalTokens, 2);
+    test:assertEquals(chunks[0].finishReason, ());
 }
 
 @test:Config
 function testChatStreamWithContentFilterFinishReason() returns ai:Error? {
     ModelProvider provider = check streamProvider("contentfilter");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[] chunks = check collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
 
     test:assertEquals(chunks.length(), 1);
-    test:assertEquals(chunks[0].choices[0].finishReason, ai:CONTENT_FILTER);
+    test:assertEquals(chunks[0].finishReason, ai:CONTENT_FILTER);
 }
 
 @test:Config
 function testChatStreamWithReasoningContent() returns ai:Error? {
     ModelProvider provider = check streamProvider("reasoning");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[] chunks = check collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
 
     test:assertEquals(chunks.length(), 2, "`thinking` fragments must not fail the chunk");
     // Reasoning is surfaced separately from the answer text.
-    test:assertEquals(chunks[0].choices[0].delta.reasoning, "weighing");
-    test:assertEquals(chunks[0].choices[0].delta.content, ());
-    test:assertEquals(chunks[1].choices[0].delta.content, "Answer");
-    test:assertEquals(chunks[1].choices[0].delta.reasoning, ());
+    test:assertEquals(chunks[0].reasoning, "weighing");
+    test:assertEquals(chunks[0].content, ());
+    test:assertEquals(chunks[1].content, "Answer");
+    test:assertEquals(chunks[1].reasoning, ());
 }
 
 @test:Config
 function testChatStreamWithToolCallFragments() returns ai:Error? {
     ModelProvider provider = check streamProvider("tools");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Weather?"},
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Weather?"},
             [{name: "getWeather", description: "Gets the weather", parameters: {"type": "object"}}]);
-    ai:ChatCompletionChunk[] chunks = check collect(chunkStream);
+    ai:ChatMessageChunk[] chunks = check collect(chunkStream);
 
     test:assertEquals(chunks.length(), 3);
-    ai:ToolCallChunk[] first = <ai:ToolCallChunk[]>chunks[0].choices[0].delta.toolCalls;
+    ai:ToolCallChunk[] first = <ai:ToolCallChunk[]>chunks[0].toolCalls;
     test:assertEquals(first[0].id, "call_1");
-    test:assertEquals(first[0]?.'function?.name, "getWeather");
+    test:assertEquals(first[0]?.name, "getWeather");
+    test:assertEquals(chunks[2].finishReason, ai:TOOL_CALLS);
 
     // Mistral omits `index` on the later fragments of a single tool call; the
     // position in the array must stand in so fragments still correlate.
     string arguments = "";
-    foreach ai:ChatCompletionChunk chunk in chunks {
-        ai:ToolCallChunk[]? toolCalls = chunk.choices[0].delta.toolCalls;
+    foreach ai:ChatMessageChunk chunk in chunks {
+        ai:ToolCallChunk[]? toolCalls = chunk.toolCalls;
         if toolCalls is ai:ToolCallChunk[] {
             test:assertEquals(toolCalls[0].index, 0);
-            arguments += toolCalls[0]?.'function?.arguments ?: "";
+            arguments += toolCalls[0]?.arguments ?: "";
         }
     }
     test:assertEquals(arguments, string `{"city":"CMB"}`);
@@ -119,11 +138,11 @@ function testChatStreamWithToolCallFragments() returns ai:Error? {
 @test:Config
 function testChatStreamFailsOnAbortedGeneration() returns ai:Error? {
     ModelProvider provider = check streamProvider("aborted");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[]|ai:Error result = collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[]|ai:Error result = collect(chunkStream);
 
     // A truncated answer must not be reported as a clean end of stream.
-    if result is ai:ChatCompletionChunk[] {
+    if result is ai:ChatMessageChunk[] {
         test:assertFail("expected the aborted generation to fail the stream");
     }
     test:assertTrue(result is ai:LlmError);
@@ -134,10 +153,10 @@ function testChatStreamFailsOnAbortedGeneration() returns ai:Error? {
 @test:Config
 function testChatStreamFailsOnMalformedChunk() returns ai:Error? {
     ModelProvider provider = check streamProvider("malformed");
-    stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = check provider->chatStream({role: ai:USER, content: "Hi"});
-    ai:ChatCompletionChunk[]|ai:Error result = collect(chunkStream);
+    stream<ai:ChatMessageChunk, ai:Error?> chunkStream = check provider->chatAsStream({role: ai:USER, content: "Hi"});
+    ai:ChatMessageChunk[]|ai:Error result = collect(chunkStream);
 
-    if result is ai:ChatCompletionChunk[] {
+    if result is ai:ChatMessageChunk[] {
         test:assertFail("expected the malformed chunk to fail the stream");
     }
     test:assertTrue(result is ai:LlmInvalidResponseError);
@@ -148,8 +167,8 @@ function testChatStreamFailsOnMalformedChunk() returns ai:Error? {
 @test:Config
 function testChatStreamSurfacesErrorResponse() returns ai:Error? {
     ModelProvider provider = check streamProvider("ratelimited");
-    stream<ai:ChatCompletionChunk, ai:Error?>|ai:Error result =
-        provider->chatStream({role: ai:USER, content: "Hi"});
+    stream<ai:ChatMessageChunk, ai:Error?>|ai:Error result =
+        provider->chatAsStream({role: ai:USER, content: "Hi"});
 
     if result !is ai:Error {
         test:assertFail("expected the 429 response to surface as an error");
@@ -162,8 +181,8 @@ function testChatStreamSurfacesErrorResponse() returns ai:Error? {
 @test:Config
 function testChatStreamRejectsNonSseResponse() returns ai:Error? {
     ModelProvider provider = check streamProvider("notastream");
-    stream<ai:ChatCompletionChunk, ai:Error?>|ai:Error result =
-        provider->chatStream({role: ai:USER, content: "Hi"});
+    stream<ai:ChatMessageChunk, ai:Error?>|ai:Error result =
+        provider->chatAsStream({role: ai:USER, content: "Hi"});
 
     if result !is ai:Error {
         test:assertFail("expected a non-SSE response to surface as an error");
@@ -172,9 +191,9 @@ function testChatStreamRejectsNonSseResponse() returns ai:Error? {
 }
 
 @test:Config
-function testGenerateStreamYieldsAnswerText() returns ai:Error? {
+function testGenerateAsStreamYieldsAnswerText() returns ai:Error? {
     ModelProvider provider = check streamProvider("text");
-    stream<string, ai:Error?> fragments = check provider->generateStream(`Say hello`);
+    stream<string, ai:Error?> fragments = check provider->generateAsStream(`Say hello`);
 
     string answer = "";
     check from string fragment in fragments
@@ -185,9 +204,9 @@ function testGenerateStreamYieldsAnswerText() returns ai:Error? {
 }
 
 @test:Config
-function testGenerateStreamSkipsReasoningFragments() returns ai:Error? {
+function testGenerateAsStreamSkipsReasoningFragments() returns ai:Error? {
     ModelProvider provider = check streamProvider("reasoning");
-    stream<string, ai:Error?> fragments = check provider->generateStream(`Think`);
+    stream<string, ai:Error?> fragments = check provider->generateAsStream(`Think`);
 
     string answer = "";
     check from string fragment in fragments
@@ -199,13 +218,12 @@ function testGenerateStreamSkipsReasoningFragments() returns ai:Error? {
 }
 
 @test:Config
-function testGenerateStreamRejectsNonStringType() returns ai:Error? {
-    ModelProvider provider = check streamProvider("text");
-    stream<int, ai:Error?>|ai:Error result = provider->generateStream(`Rate this out of 10`);
+function testGenerateAsStreamSurfacesConnectionError() returns ai:Error? {
+    ModelProvider provider = check streamProvider("ratelimited");
+    stream<string, ai:Error?>|ai:Error result = provider->generateAsStream(`Say hello`);
 
     if result !is ai:Error {
-        test:assertFail("expected a non-string expected type to be rejected");
+        test:assertFail("expected the 429 response to surface as an error");
     }
-    test:assertEquals(result.message(), "This data type is not supported for streaming. " +
-            "'generateStream' supports only 'string'; use 'generate' for structured types.");
+    test:assertTrue(result is ai:LlmConnectionError);
 }

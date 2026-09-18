@@ -10,10 +10,11 @@ repository = "https://github.com/ballerina-platform/module-ballerinax-ai.mistral
 version = "@toml.version@"
 
 # TODO: Temporary local dependency on the `ballerina/ai` build that carries the
-# streaming contract (`ChatCompletionChunk`, `ModelProvider.chatStream`).
-# No published `ballerina/ai` release contains it yet - the latest on Ballerina
-# Central is 1.14.1 and it does not. This package MUST NOT be merged or released
-# until that contract ships; then drop this block and bump the version below.
+# finalized streaming contract (`ChatMessageChunk`, `ModelProvider.chatAsStream`/
+# `generateAsStream`). No published `ballerina/ai` release contains it yet - the
+# latest on Ballerina Central is 1.14.1 and it does not. This package MUST NOT be
+# merged or released until that contract ships; then drop this block and bump
+# the version below.
 [[dependency]]
 org = "ballerina"
 name = "ai"

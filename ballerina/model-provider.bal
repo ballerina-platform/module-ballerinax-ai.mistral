@@ -91,7 +91,7 @@ public isolated client class ModelProvider {
 
         // Mirrors `mistralConfig` field for field: the streaming endpoint must honour
         // the same proxy, TLS, pooling and retry settings as `chat`, or a deployment
-        // behind a proxy or a custom CA would work for `chat` and fail for `chatStream`.
+        // behind a proxy or a custom CA would work for `chat` and fail for `chatAsStream`.
         http:ClientConfiguration streamClientConfig = {
             auth: {token: apiKey},
             httpVersion: connectionConfig.httpVersion,
@@ -202,10 +202,10 @@ public isolated client class ModelProvider {
     # + messages - List of chat messages or a single user message
     # + tools - Tool definitions to be used for the tool call
     # + stop - Stop sequence to stop the completion
-    # + return - A stream of chat completion chunks, or an error in case of failures
-    remote function chatStream(ai:ChatMessage[]|ai:ChatUserMessage messages,
+    # + return - A stream of chat message chunks, or an error in case of failures
+    remote function chatAsStream(ai:ChatMessage[]|ai:ChatUserMessage messages,
             ai:ChatCompletionFunctions[] tools = [], string? stop = ())
-            returns stream<ai:ChatCompletionChunk, ai:Error?>|ai:Error {
+            returns stream<ai:ChatMessageChunk, ai:Error?>|ai:Error {
         observe:ChatSpan span = observe:createChatSpan(self.modelType);
         span.addProvider(PROVIDER_NAME);
         if stop is string {
@@ -249,22 +249,24 @@ public isolated client class ModelProvider {
         }
         // The iterator owns `sseStream` and `span` from here: it closes both exactly
         // once, on `[DONE]`, exhaustion, an error, or an explicit `close()`.
-        stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = new (new MistralChunkIterator(sseStream, span));
+        stream<ai:ChatMessageChunk, ai:Error?> chunkStream = new (new MistralChunkIterator(sseStream, span));
         return chunkStream;
     }
 
     # Sends a streaming chat request to the model using the given prompt and streams
-    # back the generated answer. Only `string` is supported as the expected type.
+    # back the generated answer as text fragments.
+    #
+    # Streaming produces text only: structured types have no valid intermediate state, so use
+    # `generate` for structured output.
     #
     # + prompt - The prompt to use in the chat request
-    # + td - The expected type of the streamed value; must be `string`
-    # + return - A stream of the generated value, or an error if the type is unsupported
-    remote function generateStream(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
-            returns stream<td, ai:Error?>|ai:Error = @java:Method {
-        'class: "io.ballerina.lib.ai.mistral.StreamGenerator"
-    } external;
+    # + return - A stream of text fragments, or an error if generation fails
+    remote function generateAsStream(ai:Prompt prompt) returns stream<string, ai:Error?>|ai:Error {
+        stream<ai:ChatMessageChunk, ai:Error?> chunks = check self->chatAsStream({role: ai:USER, content: prompt});
+        return new stream<string, ai:Error?>(new ChunkTextIterator(chunks));
+    }
 
-    # Builds the Mistral chat completion request shared by `chat` and `chatStream`.
+    # Builds the Mistral chat completion request shared by `chat` and `chatAsStream`.
     #
     # + messages - List of chat messages or a single user message
     # + tools - Tool definitions to be exposed to the model
@@ -468,12 +470,13 @@ isolated function convertMessageToJson(ai:ChatMessage[]|ai:ChatMessage messages)
 }
 
 # Iterator that converts Mistral AI's Server-Sent Event stream into a stream of
-# normalized `ai:ChatCompletionChunk` values.
+# normalized `ai:ChatMessageChunk` values.
 #
 # Each `data:` payload is parsed into the Mistral wire chunk and mapped via
-# `toAiChunk`; the terminating `[DONE]` sentinel and blank keep-alive lines are
-# skipped. A malformed payload fails the stream rather than being skipped: the
-# consumer must not receive a silently truncated answer that looks complete.
+# `toAiChunk`; the terminating `[DONE]` sentinel, blank keep-alive lines and
+# chunks that carry nothing for the caller are skipped. A malformed payload
+# fails the stream rather than being skipped: the consumer must not receive a
+# silently truncated answer that looks complete.
 #
 # Errors raised from inside the stream carry their detail in the message rather
 # than as a cause: a query expression (`from ... in stream`) replaces an
@@ -495,11 +498,8 @@ class MistralChunkIterator {
         self.span = span;
     }
 
-    public isolated function next() returns record {|ai:ChatCompletionChunk value;|}|ai:Error? {
-        if self.isDone() {
-            return ();
-        }
-        while true {
+    public isolated function next() returns record {|ai:ChatMessageChunk value;|}|ai:Error? {
+        while !self.isDone() {
             record {|http:SseEvent value;|}|error? event = self.sseStream.next();
             if event is () {
                 self.complete();
@@ -527,8 +527,6 @@ class MistralChunkIterator {
                         string `Invalid or malformed chunk received from the model while streaming: ${
                             wireChunk.message()}`));
             }
-            ai:ChatCompletionChunk chunk = toAiChunk(wireChunk);
-            self.recordUsage(chunk);
             foreach CompletionResponseStreamChoice choice in wireChunk.choices {
                 if isAbortedFinishReason(choice.finish_reason) {
                     // The model aborted mid-generation. Returning `()` here would
@@ -537,15 +535,13 @@ class MistralChunkIterator {
                             "The model stopped generating due to an error before completing the response"));
                 }
             }
-            foreach ai:ChatCompletionChunkChoice choice in chunk.choices {
-                ai:FinishReason? finishReason = choice.finishReason;
-                if finishReason is ai:FinishReason {
-                    self.span.addFinishReason(finishReason);
-                    self.span.addOutputType(observe:TEXT);
-                }
+            self.recordObservations(wireChunk);
+            ai:ChatMessageChunk? chunk = toAiChunk(wireChunk);
+            if chunk is ai:ChatMessageChunk {
+                return {value: chunk};
             }
-            return {value: chunk};
         }
+        return ();
     }
 
     public isolated function close() returns ai:Error? {
@@ -560,20 +556,29 @@ class MistralChunkIterator {
         return ();
     }
 
-    # Records the token counts of a chunk on the span. Mistral sends `usage` only
-    # on the final chunk, so this is effectively called once per stream.
+    # Reports the finish reason and token usage carried by a wire chunk to the span.
+    # `ai:ChatMessageChunk` has no `usage` field, so this reads the wire chunk
+    # directly rather than the mapped chunk. Mistral sends `usage` only on the
+    # final chunk, so the usage counts are effectively recorded once per stream.
     #
-    # + chunk - The normalized chunk just produced
-    private isolated function recordUsage(ai:ChatCompletionChunk chunk) {
-        ai:CompletionTokenUsage? usage = chunk.usage;
+    # + wireChunk - The parsed Mistral wire chunk just received
+    private isolated function recordObservations(CompletionChunk wireChunk) {
+        foreach CompletionResponseStreamChoice choice in wireChunk.choices {
+            ai:FinishReason? finishReason = mapFinishReason(choice.finish_reason);
+            if finishReason is ai:FinishReason {
+                self.span.addFinishReason(finishReason);
+                self.span.addOutputType(observe:TEXT);
+            }
+        }
+        UsageInfo? usage = wireChunk?.usage;
         if usage is () {
             return;
         }
-        int? promptTokens = usage.promptTokens;
+        int? promptTokens = usage.prompt_tokens;
         if promptTokens is int {
             self.span.addInputTokenCount(promptTokens);
         }
-        int? completionTokens = usage.completionTokens;
+        int? completionTokens = usage.completion_tokens;
         if completionTokens is int {
             self.span.addOutputTokenCount(completionTokens);
         }
@@ -630,7 +635,7 @@ class MistralChunkIterator {
 }
 
 # Closes a chat span with the given error and returns that error, so a failing
-# `chatStream` setup step stays a single expression at the call site.
+# `chatAsStream` setup step stays a single expression at the call site.
 #
 # + span - The span to close
 # + err - The error that ended the request
@@ -656,51 +661,27 @@ isolated function getErrorResponseDetail(http:Response response) returns string 
         detail.substring(0, MAX_ERROR_DETAIL_LENGTH) + "..." : detail;
 }
 
-# Builds the string stream behind the dependently-typed `generateStream`. The
-# native `StreamGenerator` shim trampolines here so the type gating stays in
-# Ballerina. Only `string` is supported; other types yield an error because a
-# partial generation is a valid value only for `string`. When valid, the
-# underlying `chatStream` chunks are projected onto their text fragments.
-#
-# + llmModel - The model provider whose `chatStream` supplies the chunks
-# + prompt - The prompt to send to the model
-# + td - The caller's expected type; must be `string`
-# + return - A stream of text fragments, or an error if the type is unsupported
-function generateLlmResponseStream(ModelProvider llmModel, ai:Prompt prompt, typedesc<anydata> td)
-        returns stream<string, ai:Error?>|ai:Error {
-    if td !is typedesc<string> {
-        return error ai:Error("This data type is not supported for streaming. " +
-            "'generateStream' supports only 'string'; use 'generate' for structured types.");
-    }
-    stream<ai:ChatCompletionChunk, ai:Error?> chunks = check llmModel->chatStream({role: ai:USER, content: prompt});
-    stream<string, ai:Error?> textStream = new (new ChunkTextIterator(chunks));
-    return textStream;
-}
-
-# Projects a normalized `ai:ChatCompletionChunk` stream onto its text content,
-# yielding each non-empty `delta.content` fragment and skipping tool-call and
-# usage-only chunks. Backs `generateLlmResponseStream`.
+# Projects a normalized `ai:ChatMessageChunk` stream onto its answer text,
+# yielding each non-empty `content` fragment and skipping tool-call, reasoning
+# and finish-only chunks. Backs `generateAsStream`; closing it closes the
+# underlying chunk stream.
 class ChunkTextIterator {
-    private stream<ai:ChatCompletionChunk, ai:Error?> chunks;
+    private final stream<ai:ChatMessageChunk, ai:Error?> chunks;
 
-    isolated function init(stream<ai:ChatCompletionChunk, ai:Error?> chunks) {
+    isolated function init(stream<ai:ChatMessageChunk, ai:Error?> chunks) {
         self.chunks = chunks;
     }
 
     public isolated function next() returns record {|string value;|}|ai:Error? {
         while true {
-            record {|ai:ChatCompletionChunk value;|}|ai:Error? next = self.chunks.next();
+            record {|ai:ChatMessageChunk value;|}|ai:Error? next = self.chunks.next();
             if next is () {
                 return ();
             }
             if next is ai:Error {
                 return next;
             }
-            ai:ChatCompletionChunkChoice[] choices = next.value.choices;
-            if choices.length() == 0 {
-                continue;
-            }
-            string? content = choices[0].delta.content;
+            string? content = next.value.content;
             if content is string && content.length() > 0 {
                 return {value: content};
             }
