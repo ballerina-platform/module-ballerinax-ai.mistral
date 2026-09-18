@@ -120,33 +120,37 @@ public enum MISTRAL_AI_MODEL_NAMES {
 # Mistral message record.
 type MistralMessages mistral:AssistantMessage|mistral:SystemMessage|mistral:UserMessage|mistral:ToolMessage;
 
-// ── Chat Completions streaming types ───────────────────────────────────────
-// Models the `event-stream<CompletionEvent>` returned by POST /chat/completions
-// when `stream` is true. Each Server-Sent Event carries one `CompletionEvent`,
-// whose `data` field holds a `CompletionChunk`. Field names match the raw JSON
-// keys so they bind directly via `fromJsonStringWithType`.
-// Structural fields that the spec marks required are kept required; tool-call
-// fragment fields are optional because they arrive partially across chunks.
+// ── Chat Completions streaming types ──────────────────────────────
+// Models the `CompletionChunk` carried by the `data` of each Server-Sent Event
+// returned by POST /chat/completions when `stream` is true. Field names match the
+// raw JSON keys so they bind directly via `fromJsonStringWithType`.
+//
+// Every record here is open and every field optional or defaulted, and free-form
+// values (roles, finish reasons, content-chunk kinds) are typed as `string`/open
+// records rather than enums. Binding is all-or-nothing: one unmodelled field or
+// one unrecognized enum value fails the whole chunk, and a failed chunk is a
+// dropped token. Tolerance at the wire boundary is deliberate - normalization
+// and validation happen in the mapping functions below.
 // Reference: https://docs.mistral.ai/api/#tag/chat/operation/chat_completion_v1_chat_completions_post
 
-# A single Server-Sent Event in the chat completion stream.
-type CompletionEvent record {
-    # The streamed completion chunk carried by this event
-    CompletionChunk data;
-};
+# The `type` of a content fragment carrying the model's chain-of-thought.
+const THINKING_CHUNK_TYPE = "thinking";
 
-# A streamed chunk of a chat completion response (the `data` of a `CompletionEvent`).
+# The `finish_reason` Mistral sends when generation was aborted by an error.
+const FINISH_REASON_ERROR = "error";
+
+# A streamed chunk of a chat completion response (the `data` of one Server-Sent Event).
 type CompletionChunk record {
     # Unique identifier for the completion; the same across every chunk
-    string id;
+    string id?;
     # Object type, e.g. "chat.completion.chunk"
     string 'object?;
     # Unix timestamp (seconds) of creation; the same across every chunk
     int created?;
     # The model used to generate the completion
-    string model;
+    string model?;
     # The list of streamed choices
-    CompletionResponseStreamChoice[] choices;
+    CompletionResponseStreamChoice[] choices = [];
     # Token usage statistics; populated on the final chunk
     UsageInfo usage?;
 };
@@ -154,36 +158,20 @@ type CompletionChunk record {
 # A single choice within a streamed completion chunk.
 type CompletionResponseStreamChoice record {
     # Index of the choice in the list of choices
-    int index;
+    int index = 0;
     # The incremental message delta for this chunk
-    DeltaMessage delta;
-    # Reason the model stopped generating tokens; null until the final chunk.
-    # Defaulted rather than required: a chunk that omits the field would otherwise
-    # fail to bind and be dropped from the stream.
-    FinishReason? finish_reason = ();
+    DeltaMessage delta = {};
+    # Reason the model stopped generating tokens; `()` until the final chunk.
+    # Kept as a `string` rather than an enum: an unrecognized value must degrade
+    # to "unknown reason", not fail the chunk. See `mapFinishReason`.
+    string? finish_reason = ();
 };
-
-# The reason the model stopped generating tokens.
-# - `stop`: hit a natural stop point or a provided stop sequence
-# - `length`: reached the maximum number of tokens specified in the request
-# - `model_length`: reached the model's maximum context length
-# - `error`: generation stopped due to an error
-# - `tool_calls`: the model called a tool
-enum FinishReason {
-    STOP = "stop",
-    LENGTH = "length",
-    MODEL_LENGTH = "model_length",
-    ERROR = "error",
-    TOOL_CALLS = "tool_calls"
-}
 
 # The incremental message content produced in a streamed chunk.
 type DeltaMessage record {
     # The message content for this chunk: a plain string or structured content
-    # chunks; null or absent for non-content (e.g. tool-call) deltas.
-    # Note: the spec's content array also includes `FileChunk`/`ThinkChunk`/`AudioChunk`,
-    # which `mistral:ContentChunk` (module 1.0.2) does not yet model.
-    string|mistral:ContentChunk[]? content?;
+    # chunks; null or absent for non-content (e.g. tool-call) deltas
+    string|DeltaContentChunk[]? content?;
     # Index of the delta; null when not applicable
     int? index?;
     # Arbitrary metadata associated with the delta; null when absent
@@ -193,12 +181,28 @@ type DeltaMessage record {
     # Identifier of the tool call this delta belongs to; null for non-tool deltas
     string? tool_call_id?;
     # Incremental tool calls produced by the model
-    ToolCall[]? tool_calls?;
+    DeltaToolCall[]? tool_calls?;
+};
+
+# A structured content fragment within a streamed delta.
+#
+# Open by design: the spec's content array also carries `image_url`, `document_url`,
+# `reference`, `file` and `audio` chunks, and reasoning models such as
+# `magistral-*` stream `thinking` chunks. Only the fields this module projects
+# onto the normalized chunk are named; every other kind still binds and is then
+# ignored, rather than failing the chunk it arrived in.
+type DeltaContentChunk record {
+    # The kind of the fragment, e.g. "text" or "thinking"
+    string 'type?;
+    # The text of a `text` fragment
+    string text?;
+    # The nested fragments of a `thinking` fragment, themselves usually `text`
+    DeltaContentChunk[] thinking?;
 };
 
 # An incremental tool call delivered within a streamed delta. With parallel tool
 # calling, several tool calls stream concurrently, distinguished by `index`.
-type ToolCall record {
+type DeltaToolCall record {
     # Index used to correlate fragments of the same tool call across chunks
     int index?;
     # Identifier of the tool call; only present on the first chunk of the call
@@ -206,38 +210,28 @@ type ToolCall record {
     # The type of the tool, e.g. "function"; only present on the first chunk
     string 'type?;
     # The function being called
-    FunctionCall 'function?;
+    DeltaFunctionCall 'function?;
 };
 
 # The function fragment of a streamed tool call.
-type FunctionCall record {
+type DeltaFunctionCall record {
     # Name of the function to call; only present on the first chunk of the call
     string name?;
     # Incremental fragment of the function arguments, accumulated as a JSON string
     string arguments?;
 };
 
-# Token usage statistics for the completion request.
+# Token usage statistics for the completion request. Only the three counts the
+# normalized `ai:CompletionTokenUsage` can hold are modelled; the rest of the
+# spec's fields (cached tokens, audio seconds, prompt breakdowns) land in the
+# open rest field, where a shape change cannot break binding.
 type UsageInfo record {
-    # Number of tokens in the generated completion
-    int completion_tokens?;
-    # Number of prompt tokens served from cache; null when not applicable
-    int? num_cached_tokens?;
-    # Seconds of prompt audio processed; null when not applicable
-    int? prompt_audio_seconds?;
-    # Breakdown of the prompt tokens; null when not provided
-    PromptTokensDetails? prompt_token_details?;
     # Number of tokens in the prompt
     int prompt_tokens?;
-    # Breakdown of the prompt tokens; null when not provided
-    PromptTokensDetails? prompt_tokens_details?;
+    # Number of tokens in the generated completion
+    int completion_tokens?;
     # Total tokens used (prompt + completion)
     int total_tokens?;
-};
-
-# Breakdown of the tokens present in the prompt. The spec leaves the inner shape
-# unspecified here, so this is modelled as an open record to accept any fields.
-type PromptTokensDetails record {
 };
 
 // ── Wire → normalized mapping ──────────────────────────────────────────────
@@ -255,25 +249,29 @@ isolated function toAiChunk(CompletionChunk wireChunk) returns ai:ChatCompletion
     ai:ChatCompletionChunkChoice[] choices = [];
     foreach CompletionResponseStreamChoice choice in wireChunk.choices {
         DeltaMessage wireDelta = choice.delta;
-        ai:ChatCompletionChunkDelta delta = {content: toContentString(wireDelta?.content)};
+        string|DeltaContentChunk[]? wireContent = wireDelta?.content;
+        ai:ChatCompletionChunkDelta delta = {
+            content: toContentString(wireContent),
+            reasoning: toReasoningString(wireContent)
+        };
         ai:ROLE? role = mapRole(wireDelta?.role);
         if role is ai:ROLE {
             delta.role = role;
         }
-        ToolCall[]? wireToolCalls = wireDelta?.tool_calls;
-        if wireToolCalls is ToolCall[] {
+        DeltaToolCall[]? wireToolCalls = wireDelta?.tool_calls;
+        if wireToolCalls is DeltaToolCall[] {
             ai:ToolCallChunk[] toolCalls = [];
             // Mistral omits `index` on single tool calls; fall back to the position
             // in the array so fragments of the same call still correlate.
             foreach int i in 0 ..< wireToolCalls.length() {
-                ToolCall wireToolCall = wireToolCalls[i];
+                DeltaToolCall wireToolCall = wireToolCalls[i];
                 ai:ToolCallChunk toolCall = {index: wireToolCall?.index ?: i};
                 string? id = wireToolCall?.id;
                 if id is string {
                     toolCall.id = id;
                 }
-                FunctionCall? fn = wireToolCall?.'function;
-                if fn is FunctionCall {
+                DeltaFunctionCall? fn = wireToolCall?.'function;
+                if fn is DeltaFunctionCall {
                     ai:FunctionCallChunk functionFragment = {};
                     string? name = fn?.name;
                     if name is string {
@@ -292,7 +290,15 @@ isolated function toAiChunk(CompletionChunk wireChunk) returns ai:ChatCompletion
         choices.push({index: choice.index, delta, finishReason: mapFinishReason(choice.finish_reason)});
     }
 
-    ai:ChatCompletionChunk chunk = {id: wireChunk.id, model: wireChunk.model, choices};
+    ai:ChatCompletionChunk chunk = {choices};
+    string? id = wireChunk?.id;
+    if id is string {
+        chunk.id = id;
+    }
+    string? model = wireChunk?.model;
+    if model is string {
+        chunk.model = model;
+    }
     UsageInfo? usage = wireChunk?.usage;
     if usage is UsageInfo {
         ai:CompletionTokenUsage tokenUsage = {};
@@ -313,24 +319,64 @@ isolated function toAiChunk(CompletionChunk wireChunk) returns ai:ChatCompletion
     return chunk;
 }
 
-# Flattens a streamed delta's content onto the plain text the `ai` chunk carries.
-# A delta is usually a bare string; when the model streams structured content
-# chunks instead, the text ones are concatenated and the rest (image/document/
-# reference chunks) dropped, since the normalized delta holds text only.
+# Flattens a streamed delta's content onto the plain answer text the `ai` chunk
+# carries. A delta is usually a bare string; when the model streams structured
+# fragments instead, the `text` ones are concatenated and every other kind
+# (`thinking`, image/document/reference/file/audio) dropped, since the normalized
+# `content` holds answer text only. Reasoning goes to `toReasoningString`.
 #
 # + content - The `content` of a streamed delta
-# + return - The text of the delta, or `()` when it carries no text
-isolated function toContentString(string|mistral:ContentChunk[]? content) returns string? {
+# + return - The answer text of the delta, or `()` when it carries none
+isolated function toContentString(string|DeltaContentChunk[]? content) returns string? {
     if content is string? {
         return content;
     }
     string text = "";
-    foreach mistral:ContentChunk chunk in content {
-        if chunk is mistral:TextChunk {
-            text += chunk.text;
+    boolean found = false;
+    foreach DeltaContentChunk fragment in content {
+        string? fragmentText = fragment?.text;
+        // A fragment with no explicit kind but a `text` field is a text fragment;
+        // this is how `mistral:TextChunk` arrives on the wire.
+        if fragmentText is string && fragment?.'type != THINKING_CHUNK_TYPE {
+            text += fragmentText;
+            found = true;
         }
     }
-    return text == "" ? () : text;
+    return found ? text : ();
+}
+
+# Extracts the reasoning (chain-of-thought) text of a streamed delta.
+#
+# Reasoning models such as `magistral-*` stream their thinking as `thinking`
+# fragments whose own `thinking` field holds nested `text` fragments. The
+# normalized `ai:ChatCompletionChunkDelta.reasoning` field carries these
+# separately from the answer text.
+#
+# + content - The `content` of a streamed delta
+# + return - The reasoning text of the delta, or `()` when it carries none
+isolated function toReasoningString(string|DeltaContentChunk[]? content) returns string? {
+    if content is string? {
+        return ();
+    }
+    string reasoning = "";
+    boolean found = false;
+    foreach DeltaContentChunk fragment in content {
+        if fragment?.'type != THINKING_CHUNK_TYPE {
+            continue;
+        }
+        DeltaContentChunk[]? nested = fragment?.thinking;
+        if nested is () {
+            continue;
+        }
+        foreach DeltaContentChunk thought in nested {
+            string? thoughtText = thought?.text;
+            if thoughtText is string {
+                reasoning += thoughtText;
+                found = true;
+            }
+        }
+    }
+    return found ? reasoning : ();
 }
 
 # Safely maps a Mistral role string onto the `ai:ROLE` enum; returns `()` for
@@ -356,23 +402,39 @@ isolated function mapRole(string? role) returns ai:ROLE? {
     return ();
 }
 
-# Safely maps a Mistral finish reason onto the `ai:FinishReason` enum. The `ai`
-# enum has no `model_length` or `error` member: `model_length` folds into `length`
-# (both mean the token budget ran out), and `error` has no normalized equivalent
-# so it maps to `()`. Returns `()` for absent values too.
+# Reports whether a wire finish reason means the generation was aborted by the
+# model. Mistral's `error` reason has no normalized equivalent - it means the
+# response is incomplete, which the caller must not mistake for a clean end of
+# stream, so `chatStream` fails the stream on it instead of mapping it.
+#
+# + finishReason - The finish reason from the wire chunk
+# + return - Whether the generation was aborted
+isolated function isAbortedFinishReason(string? finishReason) returns boolean =>
+    finishReason == FINISH_REASON_ERROR;
+
+# Safely maps a Mistral finish reason onto the `ai:FinishReason` enum.
+#
+# Mistral's documented reasons are `stop`, `length`, `model_length`, `error` and
+# `tool_calls`. `model_length` folds into `length` (both mean the token budget
+# ran out); `error` is handled by `isAbortedFinishReason` before reaching here.
+# Absent and unrecognized reasons map to `()` rather than failing the stream, so
+# a reason added to the API later degrades to "no reason given".
 #
 # + finishReason - The finish reason from the wire chunk
 # + return - The mapped `ai:FinishReason`, or `()` when absent/unmappable
-isolated function mapFinishReason(FinishReason? finishReason) returns ai:FinishReason? {
+isolated function mapFinishReason(string? finishReason) returns ai:FinishReason? {
     match finishReason {
-        STOP => {
+        "stop" => {
             return ai:STOP;
         }
-        LENGTH|MODEL_LENGTH => {
+        "length"|"model_length" => {
             return ai:LENGTH;
         }
-        TOOL_CALLS => {
+        "tool_calls" => {
             return ai:TOOL_CALLS;
+        }
+        "content_filter" => {
+            return ai:CONTENT_FILTER;
         }
     }
     return ();

@@ -10,11 +10,14 @@ repository = "https://github.com/ballerina-platform/module-ballerinax-ai.mistral
 version = "@toml.version@"
 
 # TODO: Temporary local dependency on the `ballerina/ai` build that carries the
-# streaming contract. Replace with a published release before merging.
+# streaming contract (`ChatCompletionChunk`, `ModelProvider.chatStream`).
+# No published `ballerina/ai` release contains it yet - the latest on Ballerina
+# Central is 1.14.1 and it does not. This package MUST NOT be merged or released
+# until that contract ships; then drop this block and bump the version below.
 [[dependency]]
 org = "ballerina"
 name = "ai"
-version = "1.11.3"
+version = "1.13.0"
 repository = "local"
 
 [platform.java21]

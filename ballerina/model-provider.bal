@@ -20,12 +20,20 @@ import ballerina/data.jsondata;
 import ballerina/http;
 import ballerina/jballerina.java;
 import ballerina/lang.regexp;
+import ballerina/log;
 import ballerina/uuid;
 import ballerinax/mistral;
 
 const DEFAULT_MISTRAL_AI_SERVICE_URL = "https://api.mistral.ai/v1";
 const DEFAULT_MAX_TOKEN_COUNT = 512;
 const DEFAULT_TEMPERATURE = 0.7d;
+const PROVIDER_NAME = "mistral_ai";
+const CHAT_COMPLETIONS_PATH = "/chat/completions";
+# The payload Mistral sends as the last event of a chat completion stream.
+const DONE_SENTINEL = "[DONE]";
+# Upper bound on how much of an upstream error body is quoted back in an error
+# message, so a large or unexpected response cannot dominate the message.
+const MAX_ERROR_DETAIL_LENGTH = 512;
 
 # MistralAiProvider is a client class that provides an interface for interacting with Mistral AI Large Language Models.
 @display {
@@ -81,11 +89,27 @@ public isolated client class ModelProvider {
             return error ai:Error("Failed to initialize MistralAiProvider", llmClient);
         }
 
-        http:Client|error streamClient = new (serviceUrl, {
+        // Mirrors `mistralConfig` field for field: the streaming endpoint must honour
+        // the same proxy, TLS, pooling and retry settings as `chat`, or a deployment
+        // behind a proxy or a custom CA would work for `chat` and fail for `chatStream`.
+        http:ClientConfiguration streamClientConfig = {
             auth: {token: apiKey},
             httpVersion: connectionConfig.httpVersion,
-            timeout: connectionConfig.timeout
-        });
+            http1Settings: connectionConfig.http1Settings ?: {},
+            http2Settings: connectionConfig?.http2Settings ?: {},
+            timeout: connectionConfig.timeout,
+            forwarded: connectionConfig.forwarded,
+            poolConfig: connectionConfig?.poolConfig,
+            cache: connectionConfig?.cache ?: {},
+            compression: connectionConfig.compression,
+            circuitBreaker: connectionConfig?.circuitBreaker,
+            retryConfig: connectionConfig?.retryConfig,
+            responseLimits: connectionConfig?.responseLimits ?: {},
+            secureSocket: connectionConfig?.secureSocket,
+            proxy: connectionConfig?.proxy,
+            validation: connectionConfig.validation
+        };
+        http:Client|error streamClient = new (serviceUrl, streamClientConfig);
         if streamClient is error {
             return error ai:Error("Failed to initialize the Mistral AI streaming client", streamClient);
         }
@@ -106,7 +130,7 @@ public isolated client class ModelProvider {
     isolated remote function chat(ai:ChatMessage[]|ai:ChatUserMessage messages, ai:ChatCompletionFunctions[] tools, string? stop = ())
         returns ai:ChatAssistantMessage|ai:Error {
         observe:ChatSpan span = observe:createChatSpan(self.modelType);
-        span.addProvider("mistral_ai");
+        span.addProvider(PROVIDER_NAME);
         if stop is string {
             span.addStopSequence(stop);
         }
@@ -116,34 +140,13 @@ public isolated client class ModelProvider {
             span.addInputMessages(inputMessage);
         }
 
-        MistralMessages[] mistralMessages = check self.mapToMistralMessageRecords(messages);
-        mistral:ChatCompletionRequest request = {
-            model: self.modelType,
-            stop,
-            messages: mistralMessages,
-            temperature: self.temperature,
-            maxTokens: self.maxTokens
-        };
-
         if tools.length() > 0 {
             span.addTools(tools);
-            mistral:Function[] mistralFunctions = [];
-            foreach ai:ChatCompletionFunctions toolFunction in tools {
-                mistral:Function mistralFunction = {
-                    name: toolFunction.name,
-                    description: toolFunction.description,
-                    strict: false,
-                    parameters: toolFunction.parameters ?: {}
-                };
-                mistralFunctions.push(mistralFunction);
-            }
-
-            mistral:Tool[] mistralTools = [];
-            foreach mistral:Function mistralfunction in mistralFunctions {
-                mistral:Tool mistralTool = {'function: mistralfunction};
-                mistralTools.push(mistralTool);
-            }
-            request.tools = mistralTools;
+        }
+        mistral:ChatCompletionRequest|ai:Error request = self.buildChatCompletionRequest(messages, tools, stop, false);
+        if request is ai:Error {
+            span.close(request);
+            return request;
         }
 
         mistral:ChatCompletionResponse|error response = self.llmClient->/chat/completions.post(request);
@@ -203,15 +206,82 @@ public isolated client class ModelProvider {
     remote function chatStream(ai:ChatMessage[]|ai:ChatUserMessage messages,
             ai:ChatCompletionFunctions[] tools = [], string? stop = ())
             returns stream<ai:ChatCompletionChunk, ai:Error?>|ai:Error {
+        observe:ChatSpan span = observe:createChatSpan(self.modelType);
+        span.addProvider(PROVIDER_NAME);
+        if stop is string {
+            span.addStopSequence(stop);
+        }
+        span.addTemperature(self.temperature);
+        json|ai:Error inputMessage = convertMessageToJson(messages);
+        if inputMessage is json {
+            span.addInputMessages(inputMessage);
+        }
+        if tools.length() > 0 {
+            span.addTools(tools);
+        }
+
+        mistral:ChatCompletionRequest|ai:Error request = self.buildChatCompletionRequest(messages, tools, stop, true);
+        if request is ai:Error {
+            span.close(request);
+            return request;
+        }
+
+        // `jsondata:toJson` is required here: the `mistral` records carry
+        // `@jsondata:Name` annotations, so a plain `toJson()` would emit the
+        // Ballerina field names (`maxTokens`, `toolCalls`) instead of the wire ones.
+        http:Response|error response = self.streamClient->post(CHAT_COMPLETIONS_PATH, jsondata:toJson(request));
+        if response is error {
+            return closeSpanWith(span,
+                    error ai:LlmConnectionError("Error while connecting to the model for streaming", response));
+        }
+        if response.statusCode != http:STATUS_OK {
+            // A non-2xx response (e.g. rate limiting, invalid model) is returned as a
+            // plain JSON error body, not an SSE stream. Surface it instead of failing
+            // with a misleading "not text/event-stream" error from getSseEventStream().
+            return closeSpanWith(span, error ai:LlmConnectionError(
+                    string `Model returned an error while streaming (HTTP ${response.statusCode}): ${
+                        getErrorResponseDetail(response)}`));
+        }
+        stream<http:SseEvent, error?>|error sseStream = response.getSseEventStream();
+        if sseStream is error {
+            return closeSpanWith(span,
+                    error ai:LlmInvalidResponseError("Failed to open the SSE stream from the model", sseStream));
+        }
+        // The iterator owns `sseStream` and `span` from here: it closes both exactly
+        // once, on `[DONE]`, exhaustion, an error, or an explicit `close()`.
+        stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = new (new MistralChunkIterator(sseStream, span));
+        return chunkStream;
+    }
+
+    # Sends a streaming chat request to the model using the given prompt and streams
+    # back the generated answer. Only `string` is supported as the expected type.
+    #
+    # + prompt - The prompt to use in the chat request
+    # + td - The expected type of the streamed value; must be `string`
+    # + return - A stream of the generated value, or an error if the type is unsupported
+    remote function generateStream(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
+            returns stream<td, ai:Error?>|ai:Error = @java:Method {
+        'class: "io.ballerina.lib.ai.mistral.StreamGenerator"
+    } external;
+
+    # Builds the Mistral chat completion request shared by `chat` and `chatStream`.
+    #
+    # + messages - List of chat messages or a single user message
+    # + tools - Tool definitions to be exposed to the model
+    # + stop - Stop sequence to stop the completion
+    # + streaming - Whether the model should stream the response back
+    # + return - The mapped request, or an error if the messages could not be mapped
+    private isolated function buildChatCompletionRequest(ai:ChatMessage[]|ai:ChatUserMessage messages,
+            ai:ChatCompletionFunctions[] tools, string? stop, boolean streaming)
+            returns mistral:ChatCompletionRequest|ai:Error {
         mistral:ChatCompletionRequest request = {
             model: self.modelType,
             stop,
             messages: check self.mapToMistralMessageRecords(messages),
             temperature: self.temperature,
             maxTokens: self.maxTokens,
-            'stream: true
+            'stream: streaming
         };
-
         if tools.length() > 0 {
             mistral:Tool[] mistralTools = [];
             foreach ai:ChatCompletionFunctions tool in tools {
@@ -226,41 +296,8 @@ public isolated client class ModelProvider {
             }
             request.tools = mistralTools;
         }
-
-        // `jsondata:toJson` is required here: the `mistral` records carry
-        // `@jsondata:Name` annotations, so a plain `toJson()` would emit the
-        // Ballerina field names (`maxTokens`, `toolCalls`) instead of the wire ones.
-        http:Response|error response = self.streamClient->post("/chat/completions", jsondata:toJson(request));
-        if response is error {
-            return error ai:LlmConnectionError("Error while connecting to the model for streaming", response);
-        }
-        if response.statusCode != http:STATUS_OK {
-            // A non-2xx response (e.g. rate limiting, invalid model) is returned as a
-            // plain JSON error body, not an SSE stream. Surface it instead of failing
-            // with a misleading "not text/event-stream" error from getSseEventStream().
-            json|error errorPayload = response.getJsonPayload();
-            string detail = errorPayload is json ? errorPayload.toJsonString() : response.statusCode.toString();
-            return error ai:LlmConnectionError(
-                string `Model returned an error while streaming (HTTP ${response.statusCode}): ${detail}`);
-        }
-        stream<http:SseEvent, error?>|error sseStream = response.getSseEventStream();
-        if sseStream is error {
-            return error ai:Error("Failed to open the SSE stream from the model", sseStream);
-        }
-        stream<ai:ChatCompletionChunk, ai:Error?> chunkStream = new (new MistralChunkIterator(sseStream));
-        return chunkStream;
+        return request;
     }
-
-    # Sends a streaming chat request to the model using the given prompt and streams
-    # back the generated answer. Only `string` is supported as the expected type.
-    #
-    # + prompt - The prompt to use in the chat request
-    # + td - The expected type of the streamed value; must be `string`
-    # + return - A stream of the generated value, or an error if the type is unsupported
-    remote function generateStream(ai:Prompt prompt, @display {label: "Expected type"} typedesc<anydata> td = <>)
-            returns stream<td, ai:Error?>|ai:Error = @java:Method {
-        'class: "io.ballerina.lib.ai.mistral.StreamGenerator"
-    } external;
 
     # Generates a random tool ID.
     #
@@ -431,24 +468,46 @@ isolated function convertMessageToJson(ai:ChatMessage[]|ai:ChatMessage messages)
 }
 
 # Iterator that converts Mistral AI's Server-Sent Event stream into a stream of
-# normalized `ai:ChatCompletionChunk` values. Each `data:` payload is parsed into
-# the Mistral wire chunk and mapped via `toAiChunk`; the terminating `[DONE]`
-# sentinel, blank lines, and unparseable keep-alive comments are skipped.
+# normalized `ai:ChatCompletionChunk` values.
+#
+# Each `data:` payload is parsed into the Mistral wire chunk and mapped via
+# `toAiChunk`; the terminating `[DONE]` sentinel and blank keep-alive lines are
+# skipped. A malformed payload fails the stream rather than being skipped: the
+# consumer must not receive a silently truncated answer that looks complete.
+#
+# Errors raised from inside the stream carry their detail in the message rather
+# than as a cause: a query expression (`from ... in stream`) replaces an
+# iterator's error with that error's cause, so a wrapped error would reach such a
+# consumer as the raw underlying error instead of a typed `ai:Error`.
+#
+# The iterator owns the underlying SSE stream and closes it exactly once, on
+# whichever end comes first: the `[DONE]` sentinel, exhaustion, an error, or an
+# explicit close by the consumer. Ballerina does not close an iterator when its
+# `next` returns `()`, so releasing the connection here is what keeps a completed
+# stream from leaking it. The chat span is closed at the same points.
 class MistralChunkIterator {
     private stream<http:SseEvent, error?> sseStream;
+    private final observe:ChatSpan span;
+    private boolean done = false;
 
-    isolated function init(stream<http:SseEvent, error?> sseStream) {
+    isolated function init(stream<http:SseEvent, error?> sseStream, observe:ChatSpan span) {
         self.sseStream = sseStream;
+        self.span = span;
     }
 
     public isolated function next() returns record {|ai:ChatCompletionChunk value;|}|ai:Error? {
+        if self.isDone() {
+            return ();
+        }
         while true {
             record {|http:SseEvent value;|}|error? event = self.sseStream.next();
             if event is () {
+                self.complete();
                 return ();
             }
             if event is error {
-                return error ai:Error("Error while reading the model stream", event);
+                return self.failWith(error ai:LlmConnectionError(
+                        string `Error while reading the model stream: ${event.message()}`));
             }
             string? data = event.value.data;
             if data is () {
@@ -458,24 +517,143 @@ class MistralChunkIterator {
             if trimmedData == "" {
                 continue;
             }
-            if trimmedData == "[DONE]" {
+            if trimmedData == DONE_SENTINEL {
+                self.complete();
                 return ();
             }
             CompletionChunk|error wireChunk = trimmedData.fromJsonStringWithType();
             if wireChunk is error {
-                continue;
+                return self.failWith(error ai:LlmInvalidResponseError(
+                        string `Invalid or malformed chunk received from the model while streaming: ${
+                            wireChunk.message()}`));
             }
-            return {value: toAiChunk(wireChunk)};
+            ai:ChatCompletionChunk chunk = toAiChunk(wireChunk);
+            self.recordUsage(chunk);
+            foreach CompletionResponseStreamChoice choice in wireChunk.choices {
+                if isAbortedFinishReason(choice.finish_reason) {
+                    // The model aborted mid-generation. Returning `()` here would
+                    // report the truncated answer as a complete one.
+                    return self.failWith(error ai:LlmError(
+                            "The model stopped generating due to an error before completing the response"));
+                }
+            }
+            foreach ai:ChatCompletionChunkChoice choice in chunk.choices {
+                ai:FinishReason? finishReason = choice.finishReason;
+                if finishReason is ai:FinishReason {
+                    self.span.addFinishReason(finishReason);
+                    self.span.addOutputType(observe:TEXT);
+                }
+            }
+            return {value: chunk};
         }
     }
 
     public isolated function close() returns ai:Error? {
+        if self.markDone() {
+            return ();
+        }
+        self.span.close();
         error? result = self.sseStream.close();
         if result is error {
-            return error ai:Error("Error while closing the model stream", result);
+            return error ai:LlmConnectionError("Error while closing the model stream", result);
         }
         return ();
     }
+
+    # Records the token counts of a chunk on the span. Mistral sends `usage` only
+    # on the final chunk, so this is effectively called once per stream.
+    #
+    # + chunk - The normalized chunk just produced
+    private isolated function recordUsage(ai:ChatCompletionChunk chunk) {
+        ai:CompletionTokenUsage? usage = chunk.usage;
+        if usage is () {
+            return;
+        }
+        int? promptTokens = usage.promptTokens;
+        if promptTokens is int {
+            self.span.addInputTokenCount(promptTokens);
+        }
+        int? completionTokens = usage.completionTokens;
+        if completionTokens is int {
+            self.span.addOutputTokenCount(completionTokens);
+        }
+    }
+
+    # Ends the stream cleanly: closes the span and releases the connection.
+    private isolated function complete() {
+        if self.markDone() {
+            return;
+        }
+        self.span.close();
+        error? result = self.sseStream.close();
+        if result is error {
+            // The stream already ended successfully; a failure to release the
+            // connection must not turn that into an error for the consumer.
+            log:printWarn("failed to close the Mistral AI response stream", 'error = result);
+        }
+    }
+
+    # Ends the stream with an error: records it on the span, releases the
+    # connection, and returns the error to hand back to the consumer.
+    #
+    # + err - The error that ended the stream
+    # + return - The same error, for the caller to return
+    private isolated function failWith(ai:Error err) returns ai:Error {
+        if self.markDone() {
+            return err;
+        }
+        self.span.close(err);
+        error? result = self.sseStream.close();
+        if result is error {
+            log:printWarn("failed to close the Mistral AI response stream", 'error = result);
+        }
+        return err;
+    }
+
+    private isolated function isDone() returns boolean {
+        lock {
+            return self.done;
+        }
+    }
+
+    # Marks the stream as done, returning whether it was already done before this
+    # call - so that closing and span-closing happen exactly once.
+    #
+    # + return - Whether the stream had already been marked done
+    private isolated function markDone() returns boolean {
+        lock {
+            boolean wasDone = self.done;
+            self.done = true;
+            return wasDone;
+        }
+    }
+}
+
+# Closes a chat span with the given error and returns that error, so a failing
+# `chatStream` setup step stays a single expression at the call site.
+#
+# + span - The span to close
+# + err - The error that ended the request
+# + return - The same error
+isolated function closeSpanWith(observe:ChatSpan span, ai:Error err) returns ai:Error {
+    span.close(err);
+    return err;
+}
+
+# Extracts a short, human-readable detail from a non-2xx streaming response, for
+# use in the error message. Falls back to the status code when the body is not
+# readable JSON, and truncates so an unexpectedly large body cannot dominate.
+#
+# + response - The non-2xx response from the model
+# + return - The detail to quote in the error message
+isolated function getErrorResponseDetail(http:Response response) returns string {
+    json|error errorPayload = response.getJsonPayload();
+    if errorPayload is error {
+        return string `no error details in the response body`;
+    }
+    string detail = errorPayload.toJsonString();
+    return detail.length() > MAX_ERROR_DETAIL_LENGTH ?
+        detail.substring(0, MAX_ERROR_DETAIL_LENGTH) + "..." : detail;
 }
 
 # Builds the string stream behind the dependently-typed `generateStream`. The

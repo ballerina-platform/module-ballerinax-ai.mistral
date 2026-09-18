@@ -8,6 +8,48 @@
 
 This module provides a generic API for connecting with MistralAI's LLM chat completion models.
 
+### Streaming responses
+
+Alongside `chat` and `generate`, the model provider can stream a response back as it
+is produced, so an answer can be rendered while the model is still writing it.
+
+`generateStream` streams the answer text of a prompt. Only `string` is supported as
+the expected type - a partial generation is a valid value only for `string`; use
+`generate` for structured output.
+
+```ballerina
+import ballerina/io;
+import ballerinax/ai.mistral;
+
+public function main() returns error? {
+    mistral:ModelProvider model = check new (apiKey, mistral:MISTRAL_SMALL_LATEST);
+
+    stream<string, error?> answer = check model->generateStream(`Explain streaming in one paragraph.`);
+    check from string fragment in answer
+        do {
+            io:print(fragment);
+        };
+}
+```
+
+`chatStream` gives the full chunk stream instead, for callers that need roles, tool
+calls, reasoning, finish reasons or token usage:
+
+```ballerina
+stream<ai:ChatCompletionChunk, ai:Error?> chunks = check model->chatStream(messages, tools);
+check from ai:ChatCompletionChunk chunk in chunks
+    do {
+        io:print(chunk.choices[0].delta.content ?: "");
+    };
+```
+
+Reasoning models such as `magistral-small-latest` stream their chain-of-thought in
+`delta.reasoning`, separately from the answer text in `delta.content`. Token usage
+arrives on the final chunk.
+
+The stream releases its connection when it ends. If you stop consuming it early,
+close it explicitly with `chunks.close()`.
+
 ## Issues and projects
 
 Issues and Projects tabs are disabled for this repository as this is part of the Ballerina Library. To report bugs, request new features, start new discussions, view project boards, etc., go to the [Ballerina Library parent repository](https://github.com/ballerina-platform/ballerina-standard-library).
