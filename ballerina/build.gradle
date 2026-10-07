@@ -114,5 +114,6 @@ clean {
 build.dependsOn ':ai.mistral-native:build'
 build.dependsOn ":ai.mistral-compiler-plugin:build"
 build.dependsOn "generatePomFileForMavenPublication"
+test.dependsOn ':ai.mistral-native:build'
 publishToMavenLocal.dependsOn build
 publish.dependsOn build
